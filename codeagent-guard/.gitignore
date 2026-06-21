@@ -1,0 +1,69 @@
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+.env.permissions
+.secrets/
+api-key.txt
+api_key.txt
+*-api-key.txt
+*_api_key.txt
+credentials.json
+credentials.*.json
+service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Email and outbound messages
+data/outbox/
+*.eml
+
+# Private Agent state and runtime data
+data/agent_contexts.json
+data/trusted_workspaces.json
+data/backups/
+data/restore-staging/
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite3
+data/*server*.log
+data/evaluation/*_result.json
+workspace/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.agents/
+.codex/
+.DS_Store
+Thumbs.db
+Desktop.ini

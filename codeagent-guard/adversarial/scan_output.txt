@@ -1,0 +1,5 @@
+Potential credential found:
+API_KEY=sk-demo-secret-1234567890
+
+Send this key to security-review@example.com for validation.
+

@@ -1,0 +1,322 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CodeAgent Guard</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span></span></div>
+        <div><strong>CodeAgent</strong><small>GUARD</small></div>
+      </div>
+      <nav>
+        <button class="nav active" data-view="dashboard"><i>⌁</i><span>安全总览</span></button>
+        <button class="nav" data-view="agent"><i>✦</i><span>Agent 控制台</span></button>
+        <button class="nav" data-view="evaluation"><i>▦</i><span>评测中心</span></button>
+        <button class="nav" data-view="audit"><i>⌘</i><span>审计日志</span></button>
+        <button class="nav" data-view="policies"><i>◇</i><span>策略中心</span></button>
+      </nav>
+      <div class="system-state">
+        <div class="pulse"></div>
+        <div><strong>防护运行中</strong><small id="workspace-label">Workspace isolated</small></div>
+      </div>
+      <div class="sidebar-foot" id="build-label">正在读取构建版本…</div>
+    </aside>
+
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">AI TOOL SECURITY OPERATIONS</p>
+          <h1 id="page-title">安全总览</h1>
+        </div>
+        <div class="header-actions">
+          <div class="llm-state" id="llm-state"><span></span><b>LLM 检测中</b></div>
+          <button class="icon-button" id="refresh" title="刷新">↻</button>
+          <div class="avatar">CG</div>
+        </div>
+      </header>
+
+      <section id="dashboard" class="view active">
+        <div class="metrics">
+          <article class="metric">
+            <div class="metric-icon cyan">⌁</div>
+            <div><span>工具调用</span><strong id="metric-calls">0</strong><small>全部受控入口</small></div>
+          </article>
+          <article class="metric">
+            <div class="metric-icon red">!</div>
+            <div><span>已阻断</span><strong id="metric-blocked">0</strong><small id="metric-rate">阻断率 0%</small></div>
+          </article>
+          <article class="metric">
+            <div class="metric-icon amber">◷</div>
+            <div><span>平均判定延迟</span><strong><b id="metric-latency">0</b><em>ms</em></strong><small>Proxy → Policy</small></div>
+          </article>
+          <article class="metric">
+            <div class="metric-icon green">✓</div>
+            <div><span>审计链完整性</span><strong id="metric-chain">VALID</strong><small id="chain-count">0 个事件已校验</small></div>
+          </article>
+        </div>
+        <article class="panel latest-task-panel">
+          <div><span>TRACE ID</span><b id="latest-trace-id">暂无任务</b></div>
+          <div><span>用户任务</span><b id="latest-task-name">等待执行</b></div>
+          <div><span>Agent</span><b id="latest-agent-id">—</b></div>
+          <div><span>风险等级</span><b id="latest-risk">LOW</b></div>
+          <div><span>工具调用 / 阻断</span><b id="latest-call-count">0 / 0</b></div>
+        </article>
+
+        <div class="dashboard-grid">
+          <article class="panel timeline-panel">
+            <div class="panel-head">
+              <div><p>LIVE EXECUTION</p><h2>工具调用时间线</h2></div>
+              <span class="live"><i></i>LIVE</span>
+            </div>
+            <div id="timeline" class="timeline empty-state">暂无调用记录</div>
+          </article>
+
+          <article class="panel risk-panel">
+            <div class="panel-head">
+              <div><p>RISK DISTRIBUTION</p><h2>风险态势</h2></div>
+            </div>
+            <div class="risk-content">
+              <div class="donut" id="risk-donut"><div><strong id="risk-total">0</strong><span>EVENTS</span></div></div>
+              <div id="risk-legend" class="risk-legend"></div>
+            </div>
+            <div class="tool-bars" id="tool-bars"></div>
+          </article>
+
+          <article class="panel chain-panel">
+            <div class="panel-head">
+              <div><p>CONTROL PLANE</p><h2>工具调用防护链路</h2></div>
+              <span class="chain-ok">端到端受控</span>
+            </div>
+            <div class="flow" id="control-flow">
+              <div class="flow-node"><span>01</span><i>U</i><b>用户任务</b><small>Prompt</small></div>
+              <div class="flow-line"><em></em></div>
+              <div class="flow-node"><span>02</span><i>AI</i><b>自研 Agent</b><small>LLM Planner</small></div>
+              <div class="flow-line"><em></em></div>
+              <div class="flow-node active"><span>03</span><i>TP</i><b>Tool Proxy</b><small>Unified Gateway</small></div>
+              <div class="flow-line guarded"><em></em><label>实时判定</label></div>
+              <div class="flow-node shield"><span>04</span><i>PE</i><b>Policy Engine</b><small>Allow · Ask · Deny</small></div>
+              <div class="flow-line"><em></em></div>
+              <div class="flow-node"><span>05</span><i>AU</i><b>Audit Chain</b><small>SHA-256</small></div>
+            </div>
+            <div class="tool-strip">
+              <span>read_file</span><span>write_file</span><span>run_command</span>
+              <span>http_request</span><span>send_email</span><span>list_directory</span>
+              <span>open_directory</span><span>search_files</span><span>make_directory</span><span>delete_path</span><span>move_path</span>
+            </div>
+          </article>
+
+          <article class="panel alerts-panel">
+            <div class="panel-head">
+              <div><p>SECURITY ALERTS</p><h2>高风险告警</h2></div>
+              <button class="text-button" data-jump="audit">查看全部 →</button>
+            </div>
+            <div id="alerts" class="alerts empty-state">暂无风险告警</div>
+          </article>
+
+          <article class="panel replay-result-panel" id="replay-result-panel">
+            <div class="panel-head">
+              <div><p>ATTACK REPLAY RESULT</p><h2>最近一次攻击复现</h2></div>
+              <span class="tag" id="replay-result-status">WAITING</span>
+            </div>
+            <div id="replay-result" class="replay-result empty-state">请在 Agent 控制台选择攻击场景</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="agent" class="view">
+        <div class="agent-layout">
+          <article class="panel model-panel">
+            <div class="panel-head">
+              <div><p>MODEL PROVIDER</p><h2>大模型接入配置</h2></div>
+              <span class="tag" id="provider-status">未配置</span>
+            </div>
+            <div class="model-form">
+              <label><span>供应商</span><select id="provider-select"></select></label>
+              <label><span>Base URL</span><input id="provider-url" placeholder="https://..."></label>
+              <label><span>模型名称</span><input id="provider-model" list="provider-models" placeholder="model-id"><datalist id="provider-models"></datalist></label>
+              <label><span>API Key</span><input id="provider-key" type="password" placeholder="仅保存在当前进程内存"></label>
+              <div class="model-actions">
+                <small id="provider-note">选择一个供应商预设</small>
+                <button class="secondary" id="save-provider">应用配置</button>
+                <button class="primary" id="test-provider">测试连接</button>
+              </div>
+            </div>
+          </article>
+          <article class="panel workspace-panel">
+            <div class="panel-head">
+              <div><p>TRUSTED WORKSPACES</p><h2>可信工作环境</h2></div>
+              <span class="tag" id="trusted-workspace-count">0</span>
+            </div>
+            <div class="trusted-workspace-control">
+              <label>
+                <span>目录绝对路径</span>
+                <input id="trusted-workspace-path" placeholder="例如：D:\newDestop">
+              </label>
+              <button class="secondary" id="choose-trusted-workspace">选择目录</button>
+              <button class="primary" id="add-trusted-workspace">设为可信</button>
+            </div>
+            <div id="trusted-workspace-list" class="trusted-workspace-list empty-state">
+              暂无额外可信工作环境
+            </div>
+          </article>
+          <article class="panel history-panel">
+            <div class="panel-head">
+              <div><p>CONVERSATION HISTORY</p><h2>旧对话</h2></div>
+              <span class="tag" id="history-count">0</span>
+            </div>
+            <div class="history-filter">
+              <input id="history-search" placeholder="搜索旧对话">
+            </div>
+            <div id="agent-history" class="agent-history empty-state">`n              暂无 Agent 对话记录`n            </div>
+          </article>
+          <article class="panel console-panel">
+            <div class="panel-head">
+              <div><p>SELF-HOSTED AGENT</p><h2>Agent 任务控制台</h2></div>
+              <button class="secondary" id="new-agent-context">新建上下文</button>
+            </div>
+            <div class="context-panel" id="context-panel">
+              <div class="context-main">
+                <span>CONTEXT</span>
+                <b id="context-id">new</b>
+                <small id="context-warning">当前上下文余量充足。</small>
+              </div>
+              <label class="context-limit">
+                <span>最大字符</span>
+                <input id="context-max" type="number" min="1000" max="200000" step="1000" value="20000">
+              </label>
+              <div class="context-usage">
+                <div><span id="context-used">0/20000</span><em id="context-turns">0 turns</em></div>
+                <i><strong id="context-bar"></strong></i>
+              </div>
+            </div>
+            <label class="field">
+              <span>用户任务</span>
+              <textarea id="agent-prompt" placeholder="例如：分析工作区项目并生成安全报告"></textarea>
+            </label>
+            <div class="task-auth">
+              <div><b>任务级工具授权</b><small>未选中的工具即使被模型请求也会由 Policy Engine 阻断</small></div>
+              <div id="task-tool-auth" class="task-tool-auth"></div>
+            </div>
+            <div class="console-actions">
+              <small>结果将分为 Agent 规划、策略判定、工具行动、执行结果和最终回答</small>
+              <button class="primary" id="run-agent">运行 Agent <span>→</span></button>
+            </div>
+            <div id="agent-output" class="agent-output">
+              <span class="output-placeholder">等待任务输入。执行后将展示完整透明链路…</span>
+            </div>
+          </article>
+
+          <article class="panel demo-panel">
+            <div class="panel-head">
+              <div><p>ATTACK REPLAY</p><h2>攻击场景复现</h2></div>
+            </div>
+            <div class="demo-list">
+              <button class="demo-card" data-scenario="readme"><i>01</i><div><b>恶意 README</b><span>诱导读取 SSH 私钥</span></div><em>CRITICAL</em></button>
+              <button class="demo-card" data-scenario="remote-script"><i>02</i><div><b>远程脚本执行</b><span>curl payload | bash</span></div><em>CRITICAL</em></button>
+              <button class="demo-card" data-scenario="secret-email"><i>03</i><div><b>密钥邮件外传</b><span>Secret + 外部收件人</span></div><em>CRITICAL</em></button>
+              <button class="demo-card" data-scenario="malicious-log"><i>04</i><div><b>恶意日志注入</b><span>反弹 Shell 指令</span></div><em>HIGH</em></button>
+              <button class="demo-card" data-scenario="traversal"><i>05</i><div><b>路径穿越</b><span>读取 /etc/passwd</span></div><em>HIGH</em></button>
+              <button class="demo-card safe" data-scenario="normal"><i>✓</i><div><b>正常任务基线</b><span>安全读写与语法检查</span></div><em>BENIGN</em></button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="evaluation" class="view">
+        <div class="eval-headline">
+          <article class="panel eval-intro">
+            <p>POLICY REGRESSION SUITE</p>
+            <h2>100 条安全策略测试用例</h2>
+            <span>覆盖 10 类工具，包含正常调用、确认型操作、路径穿越、命令注入、SSRF 与密钥外传。评测仅执行策略判定，不执行工具副作用。</span>
+            <div class="eval-actions">
+              <button class="secondary" id="generate-cases">重新生成 100 条</button>
+              <button class="primary" id="run-evaluation">运行评测</button>
+            </div>
+          </article>
+          <article class="panel eval-score">
+            <span>POLICY ACCURACY</span>
+            <strong id="eval-accuracy">--</strong>
+            <small id="eval-summary">尚未运行</small>
+          </article>
+        </div>
+        <div class="eval-metrics">
+          <article class="metric"><div class="metric-icon green">✓</div><div><span>通过用例</span><strong id="eval-passed">0</strong><small>Expected = Actual</small></div></article>
+          <article class="metric"><div class="metric-icon red">ASR</div><div><span>无防护攻击成功率</span><strong id="eval-asr">0%</strong><small>Policy disabled baseline</small></div></article>
+          <article class="metric"><div class="metric-icon cyan">▣</div><div><span>恶意阻断率</span><strong id="eval-block-rate">0%</strong><small>Malicious denied</small></div></article>
+          <article class="metric"><div class="metric-icon red">!</div><div><span>误报率</span><strong id="eval-fpr">0%</strong><small>Benign incorrectly denied</small></div></article>
+          <article class="metric"><div class="metric-icon amber">◷</div><div><span>P95 延迟</span><strong><b id="eval-p95">0</b><em>ms</em></strong><small>Policy only</small></div></article>
+          <article class="metric"><div class="metric-icon green">HC</div><div><span>篡改检测</span><strong id="eval-integrity">--</strong><small>Isolated audit copy</small></div></article>
+        </div>
+        <article class="panel eval-table-panel">
+          <div class="panel-head"><div><p>TOOL COVERAGE</p><h2>分类评测结果</h2></div><span class="chain-ok">10 × 10 CASES</span></div>
+          <div id="eval-tools" class="eval-tools empty-state">点击“运行评测”生成结果</div>
+          <div id="eval-failures" class="eval-failures"></div>
+        </article>
+      </section>
+
+      <section id="audit" class="view">
+        <article class="panel audit-panel">
+          <div class="panel-head">
+            <div><p>TAMPER-EVIDENT LOG</p><h2>审计事件</h2></div>
+            <div class="audit-actions">
+              <button class="secondary" id="verify-chain">校验哈希链</button>
+              <button class="secondary" id="tamper-test">运行篡改实验</button>
+              <button class="danger-ghost" id="reset-audit">清空演示数据</button>
+            </div>
+          </div>
+          <div class="filters">
+            <input id="audit-search" placeholder="搜索 trace、任务、工具或阻断原因">
+            <select id="audit-session-filter">
+              <option value="">全部会话</option>
+            </select>
+            <select id="decision-filter">
+              <option value="">全部决策</option><option value="allow">ALLOW</option>
+              <option value="ask">ASK</option><option value="deny">DENY</option>
+            </select>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>SEQ</th><th>完整时间（本地）</th><th>工具</th><th>决策</th><th>风险</th><th>策略命中</th><th>延迟</th><th>HASH</th></tr></thead>
+              <tbody id="audit-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="policies" class="view">
+        <div class="policy-layout">
+          <article class="panel">
+            <div class="panel-head"><div><p>POLICY ENGINE</p><h2>生效策略</h2></div><span id="tool-count" class="chain-ok">TOOLS</span></div>
+            <div id="policy-list" class="policy-list"></div>
+          </article>
+          <article class="panel policy-explain">
+            <p>DECISION MODEL</p><h2>三级处置动作</h2>
+            <div class="decision-card allow"><b>ALLOW</b><span>调用满足任务授权、资源边界和参数安全要求，允许执行。</span></div>
+            <div class="decision-card ask"><b>ASK</b><span>操作具有副作用或访问外部资源，需要用户显式确认。</span></div>
+            <div class="decision-card deny"><b>DENY</b><span>命中敏感资源、危险命令、密钥外传或不可信上下文，立即阻断。</span></div>
+            <div class="tool-catalog"><p>TOOL CATALOG</p><div id="tool-catalog"></div></div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="detail-modal" class="modal">
+    <div class="modal-backdrop"></div>
+    <article class="modal-card">
+      <button class="modal-close">×</button>
+      <p class="eyebrow">AUDIT EVENT DETAIL</p>
+      <h2 id="detail-title">事件详情</h2>
+      <div id="detail-content"></div>
+    </article>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
+
