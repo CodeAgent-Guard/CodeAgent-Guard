@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from guard.adapters import OpenCodeToolProxyAdapter
 from guard.agent import Agent
 from guard.audit import AuditStore
 from guard.catalog import TOOL_SCHEMAS
@@ -73,6 +74,7 @@ proxy = ToolProxy(
 )
 provider = LLMProvider()
 agent = Agent(proxy, provider, transparency, DATA / "agent_contexts.json")
+opencode_adapter = OpenCodeToolProxyAdapter(proxy, transparency)
 evaluation = EvaluationService(policy, DATA / "evaluation", audit)
 
 
@@ -266,6 +268,31 @@ class Handler(BaseHTTPRequestHandler):
                     agent_id=str(body.get("agent_id", "external-agent")),
                     call_id=body.get("call_id"),
                     allowed_tools=body.get("allowed_tools"),
+                )
+                self._json(result)
+            elif parsed.path == "/api/opencode/authorize-tool":
+                tool = str(body.get("tool", "")).strip()
+                if not tool:
+                    raise ValueError("tool 不能为空")
+                args = body.get("args") or {}
+                if not isinstance(args, dict):
+                    raise ValueError("args 必须是对象")
+                allowed_tools = body.get("allowed_tools")
+                if allowed_tools is not None and not isinstance(allowed_tools, list):
+                    raise ValueError("allowed_tools 必须是数组")
+                result = opencode_adapter.authorize_tool(
+                    trace_id=str(
+                        body.get("trace_id")
+                        or f"opencode-{body.get('session_id', 'session')}"
+                    ),
+                    task=str(body.get("task", "OpenCode 工具调用")),
+                    tool=tool,
+                    args=args,
+                    source=str(body.get("source", "agent")),
+                    tainted=bool(body.get("tainted", False)),
+                    call_id=body.get("call_id"),
+                    allowed_tools=allowed_tools,
+                    metadata=body.get("metadata") or {},
                 )
                 self._json(result)
             elif parsed.path == "/api/agent/run":

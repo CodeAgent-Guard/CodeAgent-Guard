@@ -42,10 +42,17 @@ class ToolProxy:
             ),
         )
         self.transparency = transparency or TransparencyService()
-        self._pending_approvals: dict[str, ToolCall] = {}
+        self._pending_approvals: dict[str, tuple[ToolCall, bool]] = {}
         self._approval_lock = threading.RLock()
 
     def invoke(self, call: ToolCall) -> dict:
+        return self._handle(call, execute=True)
+
+    def authorize(self, call: ToolCall) -> dict:
+        """Run policy/audit for an external tool that will execute elsewhere."""
+        return self._handle(call, execute=False)
+
+    def _handle(self, call: ToolCall, *, execute: bool) -> dict:
         self.transparency.begin(
             call.trace_id,
             task=call.task,
@@ -106,54 +113,79 @@ class ToolProxy:
         summary = "Policy blocked execution"
         action = decision.action
         if action == "allow":
+            title = f"执行 {call.tool}" if execute else f"批准 {call.tool}"
+            summary_text = (
+                f"Tool Proxy 将批准后的参数交给 {call.tool} 执行器。"
+                if execute
+                else (
+                    "Tool Proxy 已完成策略审批，实际执行权返回给外部 Agent。"
+                )
+            )
             self.transparency.emit(
                 call.trace_id,
                 phase="tool_action",
                 actor="tool_proxy",
                 label="Tool Proxy 行动",
-                status="executed",
-                title=f"执行 {call.tool}",
-                summary=f"Tool Proxy 将批准后的参数交给 {call.tool} 执行器。",
+                status="executed" if execute else "approved",
+                title=title,
+                summary=summary_text,
                 details={
                     "call_id": call.call_id,
                     "tool": call.tool,
-                    "executed": True,
+                    "executed": execute,
+                    "execution_delegated": not execute,
                     "arguments": decision.normalized_args,
                 },
             )
-            try:
-                result = self.executor.execute(call.tool, decision.normalized_args)
-                summary = self._summarize(result)
-            except Exception as exc:
-                action = "deny"
-                decision.action = "deny"
-                decision.risk_level = "medium"
-                if "tool_execution_failed" not in decision.reasons:
-                    decision.reasons.append("tool_execution_failed")
-                result = {"error": str(exc)}
-                summary = f"Execution failed: {exc}"
-            self.transparency.emit(
-                call.trace_id,
-                phase="tool_result",
-                actor="tool_executor",
-                label="工具执行结果",
-                status="success" if not result.get("error") else "error",
-                title=f"{call.tool} 返回结果",
-                summary=TransparencyService.result_summary(result),
-                details={"call_id": call.call_id, "tool": call.tool, "result": result},
-            )
+            if execute:
+                try:
+                    result = self.executor.execute(
+                        call.tool, decision.normalized_args
+                    )
+                    summary = self._summarize(result)
+                except Exception as exc:
+                    action = "deny"
+                    decision.action = "deny"
+                    decision.risk_level = "medium"
+                    if "tool_execution_failed" not in decision.reasons:
+                        decision.reasons.append("tool_execution_failed")
+                    result = {"error": str(exc)}
+                    summary = f"Execution failed: {exc}"
+                self.transparency.emit(
+                    call.trace_id,
+                    phase="tool_result",
+                    actor="tool_executor",
+                    label="工具执行结果",
+                    status="success" if not result.get("error") else "error",
+                    title=f"{call.tool} 返回结果",
+                    summary=TransparencyService.result_summary(result),
+                    details={
+                        "call_id": call.call_id,
+                        "tool": call.tool,
+                        "result": result,
+                    },
+                )
+            else:
+                result = {
+                    "approved": True,
+                    "execution_delegated": True,
+                    "normalized_args": decision.normalized_args,
+                }
+                summary = "Policy approved delegated external execution"
         else:
             approval_id = None
             if action == "ask":
                 approval_id = f"approval-{uuid.uuid4().hex[:12]}"
                 with self._approval_lock:
-                    self._pending_approvals[approval_id] = replace(
-                        call, approved=True
+                    self._pending_approvals[approval_id] = (
+                        replace(call, approved=True),
+                        execute,
                     )
                 summary = "Waiting for explicit user confirmation"
                 result = {
                     "approval_required": True,
                     "approval_id": approval_id,
+                    "execution_delegated": not execute,
                 }
             self.transparency.emit(
                 call.trace_id,
@@ -218,6 +250,7 @@ class ToolProxy:
             "latency_ms": round(policy_latency_ms, 3),
             "total_latency_ms": round(total_latency_ms, 3),
             "approval_id": result.get("approval_id"),
+            "execution_delegated": bool(result.get("execution_delegated")),
             "events": self.transparency.snapshot(call.trace_id)["events"],
         }
 
@@ -253,16 +286,18 @@ class ToolProxy:
                     "task": call.task,
                     "tool": call.tool,
                     "args": TransparencyService.redact(call.args),
+                    "execution_delegated": not execute,
                 }
-                for approval_id, call in self._pending_approvals.items()
+                for approval_id, (call, execute) in self._pending_approvals.items()
             ]
 
     def get_approval(self, approval_id: str) -> dict | None:
         """Return redacted approval metadata without consuming the request."""
         with self._approval_lock:
-            call = self._pending_approvals.get(approval_id)
-            if call is None:
+            pending = self._pending_approvals.get(approval_id)
+            if pending is None:
                 return None
+            call, execute = pending
             return {
                 "approval_id": approval_id,
                 "trace_id": call.trace_id,
@@ -271,14 +306,16 @@ class ToolProxy:
                 "task": call.task,
                 "tool": call.tool,
                 "args": TransparencyService.redact(call.args),
+                "execution_delegated": not execute,
             }
 
     def resolve_approval(self, approval_id: str, *, approve: bool,
                          actor: str = "user") -> dict:
         with self._approval_lock:
-            call = self._pending_approvals.pop(approval_id, None)
-        if call is None:
+            pending = self._pending_approvals.pop(approval_id, None)
+        if pending is None:
             raise ValueError("审批请求不存在、已处理或服务已重启")
+        call, execute = pending
         self.transparency.emit(
             call.trace_id,
             phase="approval_decision",
@@ -298,7 +335,7 @@ class ToolProxy:
             },
         )
         if approve:
-            return self.invoke(call)
+            return self._handle(call, execute=execute)
 
         audit_event = self.audit.append(
             trace_id=call.trace_id,
@@ -338,6 +375,7 @@ class ToolProxy:
             "audit": audit_event,
             "latency_ms": 0,
             "approval_id": approval_id,
+            "execution_delegated": not execute,
             "events": self.transparency.snapshot(call.trace_id)["events"],
         }
 
