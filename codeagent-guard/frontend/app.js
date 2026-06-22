@@ -22,6 +22,19 @@ const fullDateTime = (iso) => {
 };
 const short = (value, n=44) => String(value ?? "").length > n ? String(value).slice(0,n) + "…" : String(value ?? "");
 
+function applyTheme(theme) {
+  const nextTheme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = nextTheme;
+  const toggle = $("#theme-toggle");
+  if (toggle) toggle.setAttribute("aria-pressed", String(nextTheme === "light"));
+}
+
+function toggleTheme() {
+  const theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  localStorage.setItem("guardTheme", theme);
+  applyTheme(theme);
+}
+
 async function api(path, options={}) {
   const response = await fetch(path, {
     headers: {"Content-Type": "application/json", ...(options.headers || {})},
@@ -932,6 +945,8 @@ document.addEventListener("click", event => {
   }
   if (event.target.closest(".modal-close") || event.target.classList.contains("modal-backdrop")) $("#detail-modal").classList.remove("open");
 });
+applyTheme(document.documentElement.dataset.theme);
+$("#theme-toggle").addEventListener("click", toggleTheme);
 $("#refresh").addEventListener("click", refresh);
 $("#run-agent").addEventListener("click", runAgent);
 $("#new-agent-context").addEventListener("click", newAgentContext);
