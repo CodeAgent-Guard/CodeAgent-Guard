@@ -1,0 +1,151 @@
+{
+  "generated_at": "2026-06-23T01:51:41.071128+00:00",
+  "total": 473,
+  "passed": 323,
+  "failed": 150,
+  "accuracy": 68.29,
+  "total_malicious": 352,
+  "total_benign": 121,
+  "block_rate": 75.28,
+  "false_negative_rate": 24.72,
+  "false_positive_rate": 32.23,
+  "by_tool": {
+    "read_file": {
+      "total": 66,
+      "passed": 56,
+      "denied": 40
+    },
+    "write_file": {
+      "total": 26,
+      "passed": 23,
+      "denied": 12
+    },
+    "run_command": {
+      "total": 292,
+      "passed": 181,
+      "denied": 188
+    },
+    "http_request": {
+      "total": 53,
+      "passed": 41,
+      "denied": 52
+    },
+    "send_email": {
+      "total": 29,
+      "passed": 15,
+      "denied": 12
+    },
+    "list_directory": {
+      "total": 3,
+      "passed": 3,
+      "denied": 0
+    },
+    "search_files": {
+      "total": 3,
+      "passed": 3,
+      "denied": 0
+    },
+    "move_path": {
+      "total": 1,
+      "passed": 1,
+      "denied": 0
+    }
+  },
+  "by_category": {
+    "A. 正常任务 (Benign)": {
+      "total": 55,
+      "passed": 38,
+      "malicious": 0,
+      "blocked": 10,
+      "fn": 0
+    },
+    "B. 单步直接攻击": {
+      "total": 50,
+      "passed": 25,
+      "malicious": 50,
+      "blocked": 25,
+      "fn": 25
+    },
+    "C. 多轮诱导攻击": {
+      "total": 30,
+      "passed": 23,
+      "malicious": 19,
+      "blocked": 26,
+      "fn": 0
+    },
+    "D. 间接提示注入": {
+      "total": 50,
+      "passed": 44,
+      "malicious": 42,
+      "blocked": 48,
+      "fn": 0
+    },
+    "E. 工具输出污染": {
+      "total": 30,
+      "passed": 26,
+      "malicious": 26,
+      "blocked": 30,
+      "fn": 0
+    },
+    "F. 路径穿越攻击": {
+      "total": 40,
+      "passed": 27,
+      "malicious": 38,
+      "blocked": 27,
+      "fn": 11
+    },
+    "G. 符号链接与特殊文件攻击": {
+      "total": 28,
+      "passed": 10,
+      "malicious": 16,
+      "blocked": 14,
+      "fn": 9
+    },
+    "H. 编码与分段 Payload": {
+      "total": 30,
+      "passed": 16,
+      "malicious": 30,
+      "blocked": 16,
+      "fn": 14
+    },
+    "I. 外部邮箱伪装攻击": {
+      "total": 20,
+      "passed": 10,
+      "malicious": 10,
+      "blocked": 9,
+      "fn": 4
+    },
+    "J. SSRF 与云元数据攻击": {
+      "total": 40,
+      "passed": 38,
+      "malicious": 39,
+      "blocked": 39,
+      "fn": 1
+    },
+    "K. 危险 Shell 管道与命令注入": {
+      "total": 30,
+      "passed": 17,
+      "malicious": 30,
+      "blocked": 17,
+      "fn": 13
+    },
+    "L. Package/Script 投毒攻击": {
+      "total": 30,
+      "passed": 16,
+      "malicious": 14,
+      "blocked": 10,
+      "fn": 5
+    },
+    "M. 绕过与边缘案例": {
+      "total": 40,
+      "passed": 33,
+      "malicious": 38,
+      "blocked": 33,
+      "fn": 5
+    }
+  },
+  "avg_latency_ms": 23.6617,
+  "p50_latency_ms": 0.0399,
+  "p95_latency_ms": 0.1412,
+  "p99_latency_ms": 14.8366
+}
