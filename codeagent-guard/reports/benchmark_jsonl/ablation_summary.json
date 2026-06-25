@@ -1,0 +1,40 @@
+{
+  "generated_at": "2026-06-23T10:17:14.108045+00:00",
+  "benchmark": "benchmarks\\agent_tool_bench\\cases\\benchmark.jsonl",
+  "total_cases": 473,
+  "modes": {
+    "full_ct_trm": {
+      "mode": "full_ct_trm",
+      "total_cases": 473,
+      "passed": 459,
+      "accuracy": 97.04,
+      "holdout_accuracy": 0.0,
+      "actual_allow": 60,
+      "actual_ask": 60,
+      "actual_deny": 353,
+      "false_positive_count": 4,
+      "false_negative_count": 4,
+      "false_positive_rate": 6.78,
+      "false_negative_rate": 1.14,
+      "malicious_block_rate": 98.86,
+      "attack_intervention_rate": 98.86,
+      "complete_miss_rate": 1.14,
+      "normal_task_interference_rate": 6.78,
+      "overblocking_rate": 8.06,
+      "deny_precision": 98.58,
+      "deny_recall": 98.86,
+      "deny_f1": 98.72,
+      "macro_f1": 94.32,
+      "guard_block_rate": 74.63,
+      "ask_rate": 12.68,
+      "attack_success_rate_mock": 1.14,
+      "taint_flow_detected_count": 86,
+      "chain_risk_detected_count": 0,
+      "policy_latency_avg_ms": 1.1158,
+      "policy_latency_p50_ms": 0.7362,
+      "policy_latency_p95_ms": 3.0792,
+      "policy_latency_p99_ms": 3.5222
+    }
+  },
+  "scope_statement": "Results apply only to the current self-built benchmark and do not establish protection against every unknown attack."
+}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from .contracts import AuditPort, PolicyPort, ToolCall, ToolExecutorPort
 from .executors import ToolExecutorRegistry
+from .state import RuntimeStateStore
 from .transparency import TransparencyService
 
 
@@ -24,6 +26,8 @@ class ToolProxy:
         *,
         executor: ToolExecutorPort | None = None,
         transparency: TransparencyService | None = None,
+        state_store: RuntimeStateStore | None = None,
+        approval_ttl_seconds: int = 900,
     ) -> None:
         self.workspace = workspace.resolve()
         self.audit = audit
@@ -42,8 +46,11 @@ class ToolProxy:
             ),
         )
         self.transparency = transparency or TransparencyService()
+        self.state_store = state_store
+        self.approval_ttl_seconds = approval_ttl_seconds
         self._pending_approvals: dict[str, tuple[ToolCall, bool]] = {}
         self._approval_lock = threading.RLock()
+        self._restore_pending_approvals()
 
     def invoke(self, call: ToolCall) -> dict:
         return self._handle(call, execute=True)
@@ -86,8 +93,32 @@ class ToolProxy:
             task_allowed_tools=(
                 set(call.allowed_tools) if call.allowed_tools is not None else None
             ),
+            trace_id=call.trace_id,
+            task=call.task,
+            conversation_id=call.conversation_id,
         )
         policy_latency_ms = (time.perf_counter() - started) * 1000
+        if decision.assessment:
+            self.transparency.emit(
+                call.trace_id,
+                phase="ct_trm_assessment",
+                actor="ct_trm",
+                label="CT-TRM 风险模型",
+                status=decision.assessment.get("action", decision.action),
+                title=(
+                    "上下文污染与工具风险评估："
+                    f"{decision.assessment.get('action', decision.action).upper()}"
+                ),
+                summary=decision.assessment.get(
+                    "explanation",
+                    "CT-TRM 已完成风险聚合。",
+                ),
+                details={
+                    "call_id": call.call_id,
+                    "tool": call.tool,
+                    **decision.assessment,
+                },
+            )
         self.transparency.emit(
             call.trace_id,
             phase="policy_decision",
@@ -165,22 +196,64 @@ class ToolProxy:
                         "result": result,
                     },
                 )
+                observer = getattr(self.policy, "observe_tool_result", None)
+                if observer is not None:
+                    observer(
+                        call.tool,
+                        decision.normalized_args,
+                        result,
+                        action,
+                        trace_id=call.trace_id,
+                        call_id=call.call_id,
+                        conversation_id=call.conversation_id,
+                        taint_matches=decision.taint_matches,
+                    )
             else:
                 result = {
                     "approved": True,
                     "execution_delegated": True,
                     "normalized_args": decision.normalized_args,
+                    "result_unavailable": True,
                 }
                 summary = "Policy approved delegated external execution"
+                self.transparency.emit(
+                    call.trace_id,
+                    phase="tool_result",
+                    actor="external_agent",
+                    label="外部工具执行结果",
+                    status="unavailable",
+                    title=f"{call.tool} 结果由外部 Agent 持有",
+                    summary=(
+                        "Guard 仅完成执行前授权，当前未收到外部工具结果。"
+                    ),
+                    details={
+                        "call_id": call.call_id,
+                        "tool": call.tool,
+                        "execution_delegated": True,
+                        "result_unavailable": True,
+                    },
+                )
         else:
             approval_id = None
             if action == "ask":
                 approval_id = f"approval-{uuid.uuid4().hex[:12]}"
                 with self._approval_lock:
+                    approved_call = replace(
+                        call,
+                        args=copy.deepcopy(call.args),
+                        approved=True,
+                    )
                     self._pending_approvals[approval_id] = (
-                        replace(call, approved=True),
+                        approved_call,
                         execute,
                     )
+                    if self.state_store is not None:
+                        self.state_store.save_approval(
+                            approval_id,
+                            self._call_dict(approved_call),
+                            execute=execute,
+                            ttl_seconds=self.approval_ttl_seconds,
+                        )
                 summary = "Waiting for explicit user confirmation"
                 result = {
                     "approval_required": True,
@@ -213,14 +286,15 @@ class ToolProxy:
             trace_id=call.trace_id,
             task=call.task,
             tool=call.tool,
-            args=decision.normalized_args,
+            args=TransparencyService.redact(decision.normalized_args),
             decision=action,
             risk_level=decision.risk_level,
             reasons=decision.reasons,
             source=call.source,
             tainted=call.tainted,
-            result_summary=summary,
+            result_summary=str(TransparencyService.redact(summary)),
             latency_ms=policy_latency_ms,
+            ct_trm=TransparencyService.redact(decision.assessment),
         )
         self.transparency.emit(
             call.trace_id,
@@ -251,6 +325,7 @@ class ToolProxy:
             "total_latency_ms": round(total_latency_ms, 3),
             "approval_id": result.get("approval_id"),
             "execution_delegated": bool(result.get("execution_delegated")),
+            "ct_trm": decision.assessment,
             "events": self.transparency.snapshot(call.trace_id)["events"],
         }
 
@@ -258,7 +333,8 @@ class ToolProxy:
                 task: str = "手动工具调用", source: str = "user",
                 tainted: bool = False, approved: bool = False,
                 agent_id: str = "external-agent", call_id: str | None = None,
-                allowed_tools: list[str] | tuple[str, ...] | None = None) -> dict:
+                allowed_tools: list[str] | tuple[str, ...] | None = None,
+                conversation_id: str | None = None) -> dict:
         """Compatibility facade for the built-in Agent and HTTP API."""
         return self.invoke(ToolCall(
             tool=tool,
@@ -272,10 +348,16 @@ class ToolProxy:
             allowed_tools=(
                 tuple(allowed_tools) if allowed_tools is not None else None
             ),
+            conversation_id=conversation_id,
             call_id=call_id or f"call-{uuid.uuid4().hex[:12]}",
         ))
 
     def list_approvals(self) -> list[dict]:
+        if self.state_store is not None:
+            return [
+                self._public_approval(item)
+                for item in self.state_store.list_pending_approvals()
+            ]
         with self._approval_lock:
             return [
                 {
@@ -293,6 +375,12 @@ class ToolProxy:
 
     def get_approval(self, approval_id: str) -> dict | None:
         """Return redacted approval metadata without consuming the request."""
+        if self.state_store is not None:
+            item = self.state_store.get_approval(approval_id)
+            if item is None or item["status"] != "pending":
+                return None
+            self._restore_pending_item(item)
+            return self._public_approval(item)
         with self._approval_lock:
             pending = self._pending_approvals.get(approval_id)
             if pending is None:
@@ -309,10 +397,39 @@ class ToolProxy:
                 "execution_delegated": not execute,
             }
 
+    def get_approval_status(self, approval_id: str) -> dict | None:
+        if self.state_store is not None:
+            item = self.state_store.get_approval(approval_id)
+            if item is None:
+                return None
+            return {
+                **self._public_approval(item),
+                "status": item["status"],
+                "resolved_at": item["resolved_at"],
+                "resolution": TransparencyService.redact(
+                    item.get("resolution") or {}
+                ),
+            }
+        approval = self.get_approval(approval_id)
+        if approval is None:
+            return None
+        return {**approval, "status": "pending", "resolution": {}}
+
     def resolve_approval(self, approval_id: str, *, approve: bool,
                          actor: str = "user") -> dict:
+        persisted = None
+        if self.state_store is not None:
+            persisted = self.state_store.get_approval(approval_id)
+            if persisted is None or persisted["status"] != "pending":
+                with self._approval_lock:
+                    self._pending_approvals.pop(approval_id, None)
+                raise ValueError(
+                    "Approval does not exist, has expired, or was already resolved"
+                )
         with self._approval_lock:
             pending = self._pending_approvals.pop(approval_id, None)
+            if pending is None and persisted is not None:
+                pending = self._pending_from_item(persisted)
         if pending is None:
             raise ValueError("审批请求不存在、已处理或服务已重启")
         call, execute = pending
@@ -335,7 +452,13 @@ class ToolProxy:
             },
         )
         if approve:
-            return self._handle(call, execute=execute)
+            outcome = self._handle(call, execute=execute)
+            self._store_resolution(
+                approval_id,
+                status="approved",
+                outcome=outcome,
+            )
+            return outcome
 
         audit_event = self.audit.append(
             trace_id=call.trace_id,
@@ -365,7 +488,7 @@ class ToolProxy:
                 "hash": audit_event["hash"],
             },
         )
-        return {
+        outcome = {
             "trace_id": call.trace_id,
             "call_id": call.call_id,
             "action": "deny",
@@ -378,6 +501,115 @@ class ToolProxy:
             "execution_delegated": not execute,
             "events": self.transparency.snapshot(call.trace_id)["events"],
         }
+        self._store_resolution(
+            approval_id,
+            status="rejected",
+            outcome=outcome,
+        )
+        return outcome
+
+    def _restore_pending_approvals(self) -> None:
+        if self.state_store is None:
+            return
+        for item in self.state_store.list_pending_approvals():
+            self._restore_pending_item(item)
+
+    def _restore_pending_item(self, item: dict) -> None:
+        with self._approval_lock:
+            self._pending_approvals.setdefault(
+                item["approval_id"],
+                self._pending_from_item(item),
+            )
+
+    @staticmethod
+    def _pending_from_item(item: dict) -> tuple[ToolCall, bool]:
+        allowed_tools = item.get("allowed_tools")
+        return (
+            ToolCall(
+                tool=item["tool"],
+                args=item.get("args") or {},
+                trace_id=item["trace_id"],
+                task=item.get("task") or "Tool call",
+                source=item.get("source") or "agent",
+                tainted=bool(item.get("tainted")),
+                approved=True,
+                agent_id=item.get("agent_id") or "external-agent",
+                allowed_tools=(
+                    tuple(allowed_tools)
+                    if allowed_tools is not None
+                    else None
+                ),
+                conversation_id=item.get("conversation_id"),
+                call_id=item["call_id"],
+            ),
+            bool(item.get("execute", True)),
+        )
+
+    @staticmethod
+    def _call_dict(call: ToolCall) -> dict:
+        return {
+            "tool": call.tool,
+            "args": call.args,
+            "trace_id": call.trace_id,
+            "task": call.task,
+            "source": call.source,
+            "tainted": call.tainted,
+            "agent_id": call.agent_id,
+            "allowed_tools": (
+                list(call.allowed_tools)
+                if call.allowed_tools is not None
+                else None
+            ),
+            "conversation_id": call.conversation_id,
+            "call_id": call.call_id,
+        }
+
+    @staticmethod
+    def _public_approval(item: dict) -> dict:
+        return {
+            "approval_id": item["approval_id"],
+            "trace_id": item["trace_id"],
+            "call_id": item["call_id"],
+            "agent_id": item["agent_id"],
+            "task": item["task"],
+            "tool": item["tool"],
+            "args": TransparencyService.redact(item.get("args") or {}),
+            "execution_delegated": not bool(item.get("execute", True)),
+            "created_at": item.get("created_at"),
+            "expires_at": item.get("expires_at"),
+            "status": item.get("status", "pending"),
+            "source": item.get("source"),
+            "tainted": bool(item.get("tainted", False)),
+            "allowed_tools": item.get("allowed_tools"),
+            "conversation_id": item.get("conversation_id"),
+        }
+
+    def _store_resolution(
+        self,
+        approval_id: str,
+        *,
+        status: str,
+        outcome: dict,
+    ) -> None:
+        if self.state_store is None:
+            return
+        resolution = {
+            "trace_id": outcome.get("trace_id"),
+            "call_id": outcome.get("call_id"),
+            "action": outcome.get("action"),
+            "risk_level": outcome.get("risk_level"),
+            "reasons": outcome.get("reasons") or [],
+            "result": outcome.get("result") or {},
+            "execution_delegated": bool(
+                outcome.get("execution_delegated")
+            ),
+        }
+        self.state_store.resolve_approval(
+            approval_id,
+            status=status,
+            resolution=TransparencyService.redact(resolution),
+            retention_seconds=self.approval_ttl_seconds,
+        )
 
     @staticmethod
     def _policy_summary(action: str, risk: str, reasons: list[str]) -> str:

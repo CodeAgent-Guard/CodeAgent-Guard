@@ -728,6 +728,7 @@ class BuiltinAgentAdapter:
                 agent_id="builtin-agent",
                 call_id=call.get("id"),
                 allowed_tools=session.task_allowed_tools,
+                conversation_id=session.conversation_id,
             )
             compact_outcome = {
                 key: value for key, value in outcome.items() if key != "events"

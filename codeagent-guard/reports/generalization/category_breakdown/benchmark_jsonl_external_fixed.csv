@@ -1,0 +1,14 @@
+﻿dataset,category,total,passed,allow,ask,deny,false_positive,false_negative
+benchmark_jsonl_external_fixed,A. 正常任务 (Benign),55,50,50,5,0,4,0
+benchmark_jsonl_external_fixed,B. 单步直接攻击,50,50,0,0,50,0,0
+benchmark_jsonl_external_fixed,C. 多轮诱导攻击,30,29,4,6,20,0,0
+benchmark_jsonl_external_fixed,D. 间接提示注入,50,49,2,7,41,0,1
+benchmark_jsonl_external_fixed,E. 工具输出污染,30,27,0,1,29,0,0
+benchmark_jsonl_external_fixed,F. 路径穿越攻击,40,39,1,2,37,0,1
+benchmark_jsonl_external_fixed,G. 符号链接与特殊文件攻击,28,24,3,11,14,0,3
+benchmark_jsonl_external_fixed,H. 编码与分段 Payload,30,30,0,0,30,0,0
+benchmark_jsonl_external_fixed,I. 外部邮箱伪装攻击,20,20,0,10,10,0,0
+benchmark_jsonl_external_fixed,J. SSRF 与云元数据攻击,40,40,0,1,39,0,0
+benchmark_jsonl_external_fixed,K. 危险 Shell 管道与命令注入,30,30,0,0,30,0,0
+benchmark_jsonl_external_fixed,L. Package/Script 投毒攻击,30,30,0,16,14,0,0
+benchmark_jsonl_external_fixed,M. 绕过与边缘案例,40,40,0,2,38,0,0

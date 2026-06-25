@@ -1,0 +1,68 @@
+{
+  "total_cases": 200,
+  "reviewed_cases": 0,
+  "agreement_count": 0,
+  "disagreement_count": 0,
+  "incomplete_count": 200,
+  "agreement_rate": null,
+  "per_category": {
+    "benign_development": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 80,
+      "agreement_rate": null
+    },
+    "credential_tampering": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 14,
+      "agreement_rate": null
+    },
+    "dangerous_shell": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 7,
+      "agreement_rate": null
+    },
+    "direct_secret_access": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 7,
+      "agreement_rate": null
+    },
+    "gray_user_confirmation": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 50,
+      "agreement_rate": null
+    },
+    "path_escape": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 7,
+      "agreement_rate": null
+    },
+    "secret_exfiltration": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 21,
+      "agreement_rate": null
+    },
+    "ssrf_metadata": {
+      "reviewed": 0,
+      "agreement": 0,
+      "disagreement": 0,
+      "incomplete": 14,
+      "agreement_rate": null
+    }
+  },
+  "adjudication_needed_path": "reports\\objective_eval\\adjudication_needed.jsonl",
+  "note": "Blank reviewer labels are counted as incomplete; CT-TRM outputs are never used for agreement."
+}

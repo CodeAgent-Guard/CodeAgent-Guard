@@ -12,11 +12,19 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urljoin
+
+from .network_safety import validate_public_http_target
 
 try:
     import resource
 except ImportError:  # Windows development host
     resource = None
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class ToolExecutorRegistry:
@@ -166,17 +174,57 @@ class ToolExecutorRegistry:
         data = None if body is None else str(body).encode()
         headers = {"User-Agent": "CodeAgent-Guard/1.0"}
         headers.update(args.get("headers") or {})
-        request = urllib.request.Request(args["url"], data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                content = response.read(200_000).decode("utf-8", errors="replace")
+        current_url = str(args["url"])
+        redirects: list[dict[str, str | int]] = []
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        for _ in range(6):
+            current_url = validate_public_http_target(current_url)
+            request = urllib.request.Request(
+                current_url,
+                data=data,
+                headers=headers,
+                method=method,
+            )
+            try:
+                response = opener.open(request, timeout=10)
+            except urllib.error.HTTPError as exc:
+                location = exc.headers.get("Location")
+                if exc.code in {301, 302, 303, 307, 308} and location:
+                    target = urljoin(current_url, location)
+                    validate_public_http_target(target)
+                    redirects.append({
+                        "status": exc.code,
+                        "from": current_url,
+                        "to": target,
+                    })
+                    current_url = target
+                    if exc.code == 303 or (
+                        exc.code in {301, 302}
+                        and method not in {"GET", "HEAD"}
+                    ):
+                        method = "GET"
+                        data = None
+                    continue
+                return {
+                    "status": exc.code,
+                    "headers": dict(exc.headers.items()),
+                    "body": exc.read(50_000).decode(errors="replace"),
+                    "url": current_url,
+                    "redirects": redirects,
+                }
+            with response:
+                content = response.read(200_000).decode(
+                    "utf-8",
+                    errors="replace",
+                )
                 return {
                     "status": response.status,
                     "headers": dict(response.headers.items()),
                     "body": content,
+                    "url": current_url,
+                    "redirects": redirects,
                 }
-        except urllib.error.HTTPError as exc:
-            return {"status": exc.code, "body": exc.read(50_000).decode(errors="replace")}
+        raise ValueError("too_many_http_redirects")
 
     def send_email(self, args: dict) -> dict:
         message = email.message.EmailMessage()

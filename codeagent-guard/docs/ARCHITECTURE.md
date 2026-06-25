@@ -17,6 +17,8 @@
 │ 2. Security Boundary    │
 │ tools.py (Tool Proxy)   │
 │ policy.py               │
+│ taint.py / risk_model.py│
+│ chain_risk.py           │
 │ executors.py            │
 │ catalog.py              │
 └────────────┬────────────┘
@@ -58,7 +60,8 @@
 Agent Adapter
   ├── BuiltinAgentAdapter
   ├── ExternalAgentAdapter
-  └── 后续 OpenCode / MCP Adapter
+  ├── OpenCodeToolProxyAdapter
+  └── 后续 MCP Adapter
   ↓
 Tool Proxy（统一安全边界）
   ├── 生成 Agent 工具请求事件
@@ -100,6 +103,10 @@ Audit & Dashboard
 | Tool Proxy | `guard/tools.py` | 唯一工具安全网关与流程编排 |
 | Tool Executor | `guard/executors.py` | 工具的实际副作用实现 |
 | Policy Engine | `guard/policy.py` | 参数级安全判定 |
+| CT-TRM 来源与溯源 | `guard/taint.py`、`guard/provenance.py` | 来源、实体和传播边 |
+| CT-TRM 任务预算 | `guard/task_budget.py` | 自动推断任务能力上限 |
+| CT-TRM 序列风险 | `guard/chain_risk.py` | 当前 Trace 的跨工具调用链 |
+| CT-TRM 模式与聚合 | `guard/risk_patterns.py`、`guard/risk_model.py` | P1-P15、固定评分和硬拒绝 |
 | Audit | `guard/audit.py` | 防篡改调用审计 |
 | 透明事件 | `guard/transparency.py` | 与 Agent 无关的执行链路事件 |
 | 组合根 | `server.py` | 创建实例并注入依赖 |
@@ -134,8 +141,9 @@ Agent 恢复并生成最终回答
 `Audit & Hash Chain` 在审批前记录 ASK 是正常行为，它证明工具调用曾被暂停，
 不代表工具已经执行。批准或拒绝后还会产生新的审批和审计事件。
 
-当前暂停会话和 Tool Proxy 待审批调用保存在进程内存中，不会自动批准，也不会
-在服务重启后恢复。
+Tool Proxy 待审批调用保存在 SQLite `data/state.db` 中，服务重启后仍可继续审批。
+内置 Agent 的完整 Python 执行栈不会被序列化；若对应会话对象已丢失，系统使用
+持久化的 ToolCall、Trace 和对话记录恢复审批结果与总结。
 
 等待审批响应不包含最终回答，Trace 中也不会产生 `final_answer`。审批后所有
 退出路径统一经过最终化流程；模型总结失败、返回空内容或达到最大工具步数时，
@@ -179,8 +187,10 @@ Final Answer
 4. `工具执行结果`
 5. `Audit & Hash Chain`
 
-OpenCode 只需通过 HTTP、后续 MCP Server 或 `ExternalAgentAdapter` 调用
-Tool Proxy。用户任务、规划摘要和最终回答可以通过 Trace API 补充：
+OpenCode 已通过 `tool.execute.before` 插件和
+`POST /api/opencode/authorize-tool` 接入执行前授权。其他外部 Agent 可通过
+HTTP、后续 MCP Server 或 `ExternalAgentAdapter` 调用 Tool Proxy。用户任务、
+规划摘要和最终回答可以通过 Trace API 补充：
 
 ```text
 POST /api/traces/start
@@ -189,7 +199,21 @@ POST /api/tools/execute
 GET  /api/traces/{trace_id}
 ```
 
-即使 OpenCode 不主动上报规划摘要，安全边界的五类事件仍然完整存在。
+即使 OpenCode 不主动上报规划摘要，安全边界的工具请求、策略判定、Proxy 行动和
+审计事件仍然存在。OpenCode 获得 Allow 后由其原生工具执行，因此工具结果需要由
+OpenCode 或后续事件接口补充。Ask 时 Hook 保持等待并轮询审批状态；Dashboard
+批准后 Hook 返回，OpenCode 继续执行原生工具。若 OpenCode 进程已退出或等待超时，
+已终止进程中的调用无法恢复。
+
+## CT-TRM 判定阶段
+
+基础 Policy Engine 规则先执行，CT-TRM 随后读取当前任务、trace、conversation、
+历史来源实体和 ChainState。风险模型输出不会降低已有 Decision：基础 Deny 始终
+保持 Deny，基础 Ask 只有在用户明确审批后才能恢复。工具执行结果由 Tool Proxy
+回灌为 `workspace_file`、`config_file`、`tool_output`、`log_output` 或
+`http_response`，供后续调用进行污染匹配和序列检测。
+
+完整设计见 [`CT_TRM.md`](CT_TRM.md)。
 
 ## 扩展原则
 

@@ -1,0 +1,76 @@
+{
+  "categories": {
+    "benign": 70,
+    "dangerous_shell_and_encoded_payload": 55,
+    "indirect_prompt_injection": 50,
+    "multi_step_chain": 40,
+    "package_script_poisoning": 50,
+    "path_traversal_and_symlink": 55,
+    "secret_exfiltration": 55,
+    "ssrf_and_metadata": 45,
+    "task_tool_misalignment": 30,
+    "tool_output_poisoning": 50
+  },
+  "risk_patterns": {
+    "P1": 21,
+    "P2": 45,
+    "P3": 57,
+    "P4": 12,
+    "P5": 43,
+    "P6": 26,
+    "P7": 45,
+    "P8": 34,
+    "P9": 10,
+    "P10": 56,
+    "P11": 5,
+    "P12": 50,
+    "P13": 27,
+    "P14": 17,
+    "P15": 10
+  },
+  "chain_patterns": {
+    "C1": 7,
+    "C2": 7,
+    "C3": 7,
+    "C4": 57,
+    "C5": 56,
+    "C6": 6
+  },
+  "tools": {
+    "delete_path": 12,
+    "http_request": 87,
+    "list_directory": 7,
+    "make_directory": 6,
+    "move_path": 6,
+    "open_directory": 6,
+    "read_file": 72,
+    "run_command": 198,
+    "search_files": 7,
+    "send_email": 77,
+    "write_file": 22
+  },
+  "source_types": {
+    "code_comment": 10,
+    "config_file": 10,
+    "http_response": 12,
+    "log_output": 13,
+    "tool_output": 32,
+    "workspace_file": 30
+  },
+  "decisions": {
+    "allow": 46,
+    "ask": 64,
+    "deny": 390
+  },
+  "severities": {
+    "critical": 384,
+    "high": 58,
+    "low": 46,
+    "medium": 12
+  },
+  "splits": {
+    "dev": 150,
+    "holdout": 100,
+    "regression": 250
+  }
+}

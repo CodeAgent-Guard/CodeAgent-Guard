@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-import ipaddress
+import json
 import os
 import re
 import shlex
-import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from .catalog import TOOL_NAMES
+from .chain_risk import ChainRiskAnalyzer
+from .network_safety import NetworkTargetError, validate_public_http_target
+from .provenance import ProvenanceGraph
+from .risk_model import CTTRMRiskModel
+from .state import RuntimeStateStore
+from .taint import SourceType, TaintTracker
+from .task_budget import infer_task_budget
 
 
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -21,6 +27,8 @@ class Decision:
     risk_level: str = "low"
     reasons: list[str] = field(default_factory=list)
     normalized_args: dict = field(default_factory=dict)
+    assessment: dict = field(default_factory=dict)
+    taint_matches: list = field(default_factory=list, repr=False)
 
     def add(self, action: str, risk: str, reason: str) -> None:
         if action == "deny" or (action == "ask" and self.action == "allow"):
@@ -38,14 +46,36 @@ class PolicyEngine:
         "delete_path", "move_path", "open_directory",
     }
     SENSITIVE_PATHS = (
-        "/etc/passwd", "/etc/shadow", "/etc/sudoers", "/proc/", "/sys/",
+        "/etc/passwd", "/etc/shadow", "/etc/sudoers",
         "/root/", "/.ssh", "/.aws", "/.gnupg", "id_rsa", "id_ed25519",
+        "/.kube/config", "/.docker/config.json", ".netrc",
         ".env", "credentials", "service-account", "private_key",
+        "database.yml", "database.yaml",
     )
     SECRET_PATTERNS = (
         re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
         re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-        re.compile(r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*[\"']?[A-Za-z0-9_./+=-]{8,}"),
+        re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+        re.compile(
+            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+            r"\.[A-Za-z0-9_-]{8,}\b"
+        ),
+        re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+        re.compile(
+            r"\bAIza[A-Za-z0-9_.-]{16,}(?=$|[^A-Za-z0-9_.-])"
+        ),
+        re.compile(
+            r"(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|"
+            r"redis)://[^:\s/]+:[^@\s/]+@"
+        ),
+        re.compile(
+            r"(?i)root:[^:\r\n]*:0:0:root:/root:/bin/(?:ba)?sh"
+        ),
+        re.compile(
+            r"(?i)(api[_-]?key|secret|token|password)[\"']?\s*[:=]\s*"
+            r"[\"']?(?!https?://)[A-Za-z0-9_./+=-]{8,}"
+        ),
+        re.compile(r"\bFAKE_API_KEY_FOR_BENCHMARK_ONLY\b"),
         re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     )
     DENY_COMMANDS = (
@@ -65,7 +95,8 @@ class PolicyEngine:
                  internal_domains: set[str] | None = None,
                  open_directory_roots: list[Path] | tuple[Path, ...] | None = None,
                  external_write_roots: list[Path] | tuple[Path, ...] | None = None,
-                 trusted_workspace_roots: list[Path] | tuple[Path, ...] | None = None) -> None:
+                 trusted_workspace_roots: list[Path] | tuple[Path, ...] | None = None,
+                 state_store: RuntimeStateStore | None = None) -> None:
         self.workspace = workspace.resolve()
         self.allowed_tools = allowed_tools or set(self.TOOLS)
         self.internal_domains = internal_domains or {"codeguard.local", "localhost"}
@@ -74,6 +105,19 @@ class PolicyEngine:
         self.trusted_workspace_roots = self._normalize_roots(
             trusted_workspace_roots
         )
+        self.provenance = ProvenanceGraph()
+        self.taint_tracker = TaintTracker(
+            self.workspace,
+            provenance=self.provenance,
+            state_store=state_store,
+        )
+        self.chain_risk = ChainRiskAnalyzer(state_store=state_store)
+        self.risk_model = CTTRMRiskModel(
+            self.workspace,
+            self.taint_tracker,
+            self.chain_risk,
+        )
+        self._registered_tasks: set[tuple[str, str]] = set()
 
     def set_trusted_workspace_roots(
         self,
@@ -93,9 +137,56 @@ class PolicyEngine:
             roots.append(normalized.resolve(strict=False))
         return tuple(roots)
 
+    def _normalize_tool_args(self, tool: str, args: dict) -> dict:
+        normalized = dict(args)
+        if tool == "run_command" and not normalized.get("cmd"):
+            if normalized.get("command"):
+                normalized["cmd"] = normalized["command"]
+        if tool == "search_files" and not normalized.get("query"):
+            if normalized.get("pattern"):
+                normalized["query"] = normalized["pattern"]
+        if tool == "move_path":
+            if not normalized.get("source"):
+                source_alias = (
+                    normalized.get("src")
+                    or normalized.get("from")
+                    or normalized.get("from_path")
+                )
+                if source_alias is not None:
+                    normalized["source"] = source_alias
+            if not normalized.get("destination"):
+                destination_alias = (
+                    normalized.get("dst")
+                    or normalized.get("to")
+                    or normalized.get("target")
+                    or normalized.get("to_path")
+                )
+                if destination_alias is not None:
+                    normalized["destination"] = destination_alias
+        for key in ("path", "source", "destination", "src", "dst"):
+            if isinstance(normalized.get(key), str):
+                normalized[key] = self._workspace_alias_path(normalized[key])
+        return normalized
+
+    @staticmethod
+    def _workspace_alias_path(raw_path: str) -> str:
+        value = str(raw_path).strip()
+        normalized = value.replace("\\", "/")
+        lowered = normalized.lower().strip("/")
+        if lowered in {"workspace", "./workspace"}:
+            return "."
+        for prefix in ("workspace/", "./workspace/"):
+            if lowered.startswith(prefix):
+                return normalized[len(prefix):] or "."
+        return value
+
     def evaluate(self, tool: str, args: dict, *, source: str = "user",
                  tainted: bool = False, approved: bool = False,
-                 task_allowed_tools: set[str] | None = None) -> Decision:
+                 task_allowed_tools: set[str] | None = None,
+                 trace_id: str | None = None, task: str | None = None,
+                 conversation_id: str | None = None,
+                 ct_trm_mode: str = "full_ct_trm") -> Decision:
+        args = self._normalize_tool_args(tool, args or {})
         decision = Decision(normalized_args=dict(args))
         if tool not in self.TOOLS:
             decision.add("deny", "high", "tool_not_allowed")
@@ -109,16 +200,242 @@ class PolicyEngine:
         evaluator = getattr(self, f"_evaluate_{tool}")
         evaluator(decision, args)
 
-        if tainted and tool in self.MUTATING_TOOLS:
-            decision.add("deny", "high", "command_from_untrusted_context")
-        if source in {"runtime_log", "config_file", "tool_output", "repository_content"} and tool == "run_command":
-            decision.add("deny", "high", "command_from_untrusted_context")
+        low_trust_source = source in {
+            "runtime_log",
+            "config_file",
+            "tool_output",
+            "repository_content",
+            "code_comment",
+            "http_response",
+        }
+        if (tainted or low_trust_source) and tool in self.MUTATING_TOOLS:
+            if not task and not trace_id:
+                decision.add(
+                    "deny",
+                    "critical",
+                    "untrusted_context_requires_confirmation",
+                )
+            elif (
+                tool == "run_command"
+                and TaintTracker.command_is_dangerous(
+                    str(args.get("cmd", ""))
+                )
+            ):
+                decision.add(
+                    "deny",
+                    "critical",
+                    "command_from_untrusted_context",
+                )
+            else:
+                decision.add(
+                    "ask",
+                    "high",
+                    "untrusted_context_requires_confirmation",
+                )
+                decision.add(
+                    "ask",
+                    "high",
+                    "user_confirmation_required",
+                )
+        ct_enabled = (
+            ct_trm_mode != "baseline_rules"
+            and bool(trace_id)
+            and bool(task)
+            and task not in {"工具调用", "手动工具调用"}
+        )
+        if ct_enabled:
+            self._register_task_context(
+                str(task),
+                str(trace_id),
+                conversation_id,
+            )
+            assessment = self.risk_model.assess_tool_call(
+                tool,
+                args,
+                {
+                    "base_action": decision.action,
+                    "base_risk_level": decision.risk_level,
+                    "base_reasons": list(decision.reasons),
+                    "source_type": self._source_type(source).value,
+                    "tainted": tainted,
+                    "conversation_id": conversation_id,
+                    "ct_trm_mode": ct_trm_mode,
+                },
+                str(trace_id),
+                (
+                    infer_task_budget(str(task))
+                    if ct_trm_mode in {
+                        "ct_trm_without_chain",
+                        "full_ct_trm",
+                    }
+                    else None
+                ),
+            )
+            decision.assessment = assessment.to_dict()
+            decision.taint_matches = assessment.runtime_taint_matches
+            if ct_trm_mode == "rules_plus_source":
+                assessment.reasons = [
+                    reason for reason in assessment.reasons
+                    if reason not in {
+                        "tainted_argument_flow",
+                        "chain_risk",
+                        "task_tool_misalignment",
+                    }
+                ]
+            decision.add(
+                assessment.action,
+                assessment.risk_level,
+                assessment.reasons[0]
+                if assessment.reasons else "ct_trm_assessment",
+            )
+            for reason in assessment.reasons[1:]:
+                if reason not in decision.reasons:
+                    decision.reasons.append(reason)
         if decision.action == "deny":
             decision.reasons = [r for r in decision.reasons if r != "user_confirmation_required"]
         if approved and decision.action == "ask":
             decision.action = "allow"
             decision.reasons = [r for r in decision.reasons if r != "user_confirmation_required"]
         return decision
+
+    def register_context(
+        self,
+        content: str,
+        source_type: SourceType | str,
+        origin: str,
+        *,
+        trace_id: str,
+        tool_call_id: str | None = None,
+        conversation_id: str | None = None,
+        metadata: dict | None = None,
+    ):
+        if not isinstance(source_type, SourceType):
+            source_type = self._source_type(str(source_type))
+        return self.taint_tracker.register_context(
+            content,
+            source_type,
+            origin,
+            trace_id=trace_id,
+            tool_call_id=tool_call_id,
+            metadata={
+                **(metadata or {}),
+                "conversation_id": conversation_id,
+            },
+        )
+
+    def observe_tool_result(
+        self,
+        tool: str,
+        args: dict,
+        result: dict,
+        decision: str,
+        *,
+        trace_id: str,
+        call_id: str | None = None,
+        conversation_id: str | None = None,
+        taint_matches: list | None = None,
+    ) -> None:
+        content, source_type, origin = self._result_context(
+            tool,
+            args,
+            result,
+        )
+        if content:
+            self.register_context(
+                content,
+                source_type,
+                origin,
+                trace_id=trace_id,
+                tool_call_id=call_id,
+                conversation_id=conversation_id,
+                metadata={"tool": tool, "result_source": True},
+            )
+        self.chain_risk.update_after_tool_result(
+            tool,
+            args,
+            result,
+            decision,
+            trace_id,
+            taint_matches=taint_matches,
+        )
+
+    def _register_task_context(
+        self,
+        task: str,
+        trace_id: str,
+        conversation_id: str | None,
+    ) -> None:
+        key = (trace_id, task)
+        if key in self._registered_tasks:
+            return
+        self._registered_tasks.add(key)
+        self.register_context(
+            task,
+            SourceType.USER_TASK,
+            "user_task",
+            trace_id=trace_id,
+            conversation_id=conversation_id,
+        )
+
+    @staticmethod
+    def _source_type(source: str) -> SourceType:
+        mapping = {
+            "user": SourceType.USER_TASK,
+            "user_task": SourceType.USER_TASK,
+            "user_followup": SourceType.USER_FOLLOWUP,
+            "agent": SourceType.LLM_PLAN,
+            "repository_content": SourceType.WORKSPACE_FILE,
+            "code_comment": SourceType.CODE_COMMENT,
+            "config_file": SourceType.CONFIG_FILE,
+            "runtime_log": SourceType.LOG_OUTPUT,
+            "log_output": SourceType.LOG_OUTPUT,
+            "tool_output": SourceType.TOOL_OUTPUT,
+            "http_response": SourceType.HTTP_RESPONSE,
+            "agent_memory": SourceType.AGENT_MEMORY,
+        }
+        return mapping.get(str(source), SourceType.UNKNOWN)
+
+    @staticmethod
+    def _result_context(
+        tool: str,
+        args: dict,
+        result: dict,
+    ) -> tuple[str, SourceType, str]:
+        if tool == "read_file":
+            path = str(result.get("path") or args.get("path", ""))
+            suffix = Path(path).suffix.lower()
+            if suffix in {".env", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg"}:
+                source_type = SourceType.CONFIG_FILE
+            elif suffix in {".log", ".out"}:
+                source_type = SourceType.LOG_OUTPUT
+            else:
+                source_type = SourceType.WORKSPACE_FILE
+            return str(result.get("content", "")), source_type, path
+        if tool == "run_command":
+            content = (
+                f"{result.get('stdout', '')}\n{result.get('stderr', '')}"
+            )
+            return content, SourceType.TOOL_OUTPUT, f"{tool}.output"
+        if tool == "http_request":
+            content = (
+                f"URL: {args.get('url', '')}\n"
+                f"Headers: {result.get('headers', {})}\n"
+                f"{result.get('body', '')}"
+            )
+            return content, SourceType.HTTP_RESPONSE, str(args.get("url", ""))
+        if tool in {"search_files", "list_directory"}:
+            return (
+                json.dumps(result, ensure_ascii=False),
+                SourceType.TOOL_OUTPUT,
+                f"{tool}.output",
+            )
+        if tool == "write_file":
+            return (
+                str(args.get("content", "")),
+                SourceType.WORKSPACE_FILE,
+                str(args.get("path", "")),
+            )
+        return "", SourceType.TOOL_OUTPUT, f"{tool}.output"
 
     @staticmethod
     def _normalize_host_path(raw_path: str) -> Path:
@@ -190,6 +507,7 @@ class PolicyEngine:
         decision: Decision,
         raw_path: str,
         argument_name: str = "path",
+        outside_action: str = "deny",
     ) -> tuple[Path, str | None, Path | None]:
         normalized = self._normalize_host_path(raw_path)
         if not normalized.is_absolute():
@@ -199,7 +517,11 @@ class PolicyEngine:
         self._basic_path_checks(decision, normalized, raw_path, argument_name)
         scope, root = self._directory_scope(normalized)
         if scope is None:
-            decision.add("deny", "high", "resource_scope_violation")
+            if outside_action == "ask" and decision.action != "deny":
+                decision.add("ask", "medium", "external_file_read")
+                decision.add("ask", "medium", "user_confirmation_required")
+            else:
+                decision.add("deny", "high", "resource_scope_violation")
         return normalized, scope, root
 
     def _evaluate_read_file(self, decision: Decision, args: dict) -> None:
@@ -207,8 +529,12 @@ class PolicyEngine:
         if not raw:
             decision.add("deny", "medium", "invalid_arguments")
             return
-        normalized, scope, _ = self._directory_path_checks(decision, raw)
-        if scope == "external_write":
+        normalized, scope, _ = self._directory_path_checks(
+            decision,
+            raw,
+            outside_action="ask",
+        )
+        if scope is None or scope == "external_write":
             if not normalized.exists() or not normalized.is_file():
                 decision.add("deny", "medium", "file_not_found")
             if decision.action != "deny":
@@ -224,6 +550,13 @@ class PolicyEngine:
         content = str(args.get("content", ""))
         if self.contains_secret(content):
             decision.add("deny", "critical", "secret_leakage_detected")
+        if re.search(
+            r"(?i)(?:reset|verify|confirm|unlock)[^\n]{0,80}"
+            r"(?:password|account|identity)[^\n]{0,160}https?://",
+            content,
+        ):
+            decision.add("ask", "high", "social_engineering_content")
+            decision.add("ask", "high", "user_confirmation_required")
         if scope == "external_write":
             if normalized == root:
                 decision.add("deny", "high", "external_root_modification")
@@ -232,20 +565,45 @@ class PolicyEngine:
             if decision.action != "deny":
                 decision.add("ask", "high", "external_file_write")
                 decision.add("ask", "high", "user_confirmation_required")
+        if (
+            normalized.suffix.lower()
+            in {".exe", ".dll", ".so", ".bat", ".cmd", ".ps1"}
+            and decision.action != "deny"
+        ):
+            decision.add("ask", "high", "executable_file_write")
+            decision.add("ask", "high", "user_confirmation_required")
 
     def _evaluate_run_command(self, decision: Decision, args: dict) -> None:
         command = str(args.get("cmd", "")).strip()
         if not command:
             decision.add("deny", "medium", "invalid_arguments")
             return
+        safe_cleanup = TaintTracker.command_is_safe_cleanup(command)
         for pattern, reason in self.DENY_COMMANDS:
             if pattern.search(command):
+                if reason == "dangerous_shell_command" and safe_cleanup:
+                    continue
                 decision.add("deny", "critical" if "remote" in reason or "reverse" in reason else "high", reason)
+        if TaintTracker.command_is_dangerous(command):
+            decision.add("deny", "critical", "dangerous_shell_command")
         self._command_boundary_checks(decision, command)
-        if re.search(r"[|;&`]|\$\(", command):
+        if (
+            re.search(r"[|;&`]|\$\(", command)
+            and not TaintTracker.command_is_read_only(command)
+        ):
             decision.add("ask", "medium", "dangerous_shell_pipeline")
             decision.add("ask", "medium", "user_confirmation_required")
         if any(pattern.search(command) for pattern in self.ASK_COMMANDS):
+            decision.add("ask", "medium", "user_confirmation_required")
+        if (
+            decision.action == "allow"
+            and not TaintTracker.command_is_read_only(command)
+        ):
+            decision.add(
+                "ask",
+                "medium",
+                "command_execution_requires_confirmation",
+            )
             decision.add("ask", "medium", "user_confirmation_required")
 
     def _command_boundary_checks(self, decision: Decision, command: str) -> None:
@@ -256,12 +614,40 @@ class PolicyEngine:
         lowered = command.lower()
         if re.search(
             r"(?i)(?:^|[\s\"'])(?:~?/)?(?:\.ssh|\.aws|\.gnupg)(?:/|[\s\"']|$)"
-            r"|/(?:etc|root|proc|sys)(?:/|[\s\"']|$)"
-            r"|(?:id_rsa|id_ed25519|/etc/passwd|/etc/shadow)",
+            r"|/(?:root)(?:/|[\s\"']|$)"
+            r"|(?:id_rsa|id_ed25519|/etc/passwd|/etc/shadow|/etc/sudoers"
+            r"|\.netrc|database\.ya?ml|/dev/mem|/dev/sd[a-z])",
             command,
         ):
             decision.add("deny", "critical", "command_sensitive_resource_access")
             decision.add("deny", "critical", "resource_scope_violation")
+        if re.search(r"(?i)/(?:proc|sys)(?:/|[\s\"']|$)", command):
+            decision.add("ask", "medium", "system_introspection")
+            decision.add("ask", "medium", "user_confirmation_required")
+        if re.search(
+            r"(?i)/(?:proc/(?:\d+/environ|self/fd|net/tcp)"
+            r"|var/run/docker\.sock)",
+            command,
+        ):
+            decision.add(
+                "deny",
+                "critical",
+                "command_sensitive_resource_access",
+            )
+            decision.add("deny", "critical", "resource_scope_violation")
+        if re.search(
+            r"(?i)(?:/run/|/dev/shm(?:/|\s|$)|/tmp/\.x11-unix)",
+            command,
+        ):
+            decision.add("ask", "medium", "system_ipc_access")
+            decision.add("ask", "medium", "user_confirmation_required")
+        if re.search(
+            r"(?i)(?:^|[;&]\s*)(?:sed\s+-i|postconf\s+-e|"
+            r"echo\b[^\n]*>>)\b[^\n]*/etc/",
+            command,
+        ):
+            decision.add("ask", "high", "system_configuration_change")
+            decision.add("ask", "high", "user_confirmation_required")
         try:
             tokens = shlex.split(command)
         except ValueError:
@@ -271,15 +657,33 @@ class PolicyEngine:
             if cleaned.startswith("../") or "/../" in cleaned:
                 decision.add("deny", "high", "command_path_traversal")
                 decision.add("deny", "high", "resource_scope_violation")
-        if re.search(r"(?i)(?:^|[;&|\s])(curl|wget|nc|ncat|netcat|socat|ssh|scp)\b", lowered):
-            decision.add("deny", "high", "network_tool_bypass")
         if re.search(
-            r"(?i)(127\.0\.0\.1|0\.0\.0\.0|localhost|169\.254\.169\.254"
+            r"(?i)(?:^|[;&|\s])"
+            r"(curl|wget|nc|ncat|netcat|socat|ssh|scp)(?=\s|$)",
+            lowered,
+        ):
+            if self.contains_secret(command):
+                decision.add("deny", "critical", "secret_leakage_detected")
+                decision.add("deny", "critical", "command_secret_exfiltration")
+            decision.add("ask", "high", "network_tool_bypass")
+            decision.add("ask", "high", "user_confirmation_required")
+        if re.search(
+            r"(?i)(127\.0\.0\.1|localhost|169\.254\.169\.254"
+            r"|100\.100\.100\.200"
             r"|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+"
             r"|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)",
             command,
         ):
             decision.add("deny", "critical", "ssrf_private_network")
+        if re.search(r"(?i)(?:--address=|bind=)0\.0\.0\.0", command):
+            decision.add("ask", "high", "network_listener_exposure")
+            decision.add("ask", "high", "user_confirmation_required")
+        if re.search(
+            r"(?i)\bgrep\b[^\n]*(?:api[_-]?key|token|secret|password|"
+            r"credential)",
+            command,
+        ):
+            decision.add("deny", "high", "credential_discovery_via_shell")
 
     def _evaluate_http_request(self, decision: Decision, args: dict) -> None:
         url = str(args.get("url", ""))
@@ -294,20 +698,53 @@ class PolicyEngine:
         if method not in {"GET", "HEAD"}:
             decision.add("ask", "medium", "state_changing_http_request")
             decision.add("ask", "medium", "user_confirmation_required")
-        if parsed.hostname.lower() in {"localhost", "metadata.google.internal"}:
+        if self._contains_private_redirect_target(url):
+            decision.add("deny", "critical", "redirect_ssrf_private_network")
             decision.add("deny", "critical", "ssrf_private_network")
-            return
         try:
-            for info in socket.getaddrinfo(parsed.hostname, parsed.port or 443):
-                ip = ipaddress.ip_address(info[4][0])
-                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                    decision.add("deny", "critical", "ssrf_private_network")
-        except socket.gaierror:
-            decision.add("deny", "medium", "dns_resolution_failed")
+            decision.normalized_args["url"] = validate_public_http_target(url)
+        except NetworkTargetError as exc:
+            risk = "critical" if exc.reason == "ssrf_private_network" else "medium"
+            decision.add("deny", risk, exc.reason)
+
+    @staticmethod
+    def _contains_private_redirect_target(url: str) -> bool:
+        decoded = unquote(str(url))
+        parsed = urlparse(decoded)
+        redirect_keys = {
+            "url", "uri", "target", "redirect", "redirect_url",
+            "next", "to", "location", "dest", "destination",
+        }
+        candidates = []
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            if key.lower() in redirect_keys or "http" in value.lower():
+                candidates.append(value)
+        candidates.extend(
+            match.group(0)
+            for match in re.finditer(r"https?://[^\s\"'<>]+", decoded)
+            if match.group(0) != decoded
+        )
+        redirect_context = "redirect" in decoded.lower()
+        private_hint = re.search(
+            r"(?i)(?:localhost|loopback|metadata|169\.254\.169\.254|"
+            r"127\.0\.0\.1|2130706433|\[?::1\]?|10\.\d+\.\d+\.\d+|"
+            r"192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)",
+            decoded,
+        )
+        if redirect_context and private_hint:
+            return True
+        for candidate in candidates:
+            normalized, metadata = TaintTracker.normalize_url(candidate)
+            if metadata.get("private_or_metadata"):
+                return True
+            host = (urlparse(normalized).hostname or "").lower()
+            if host in {"localhost", "metadata.google.internal"}:
+                return True
+        return False
 
     def _evaluate_send_email(self, decision: Decision, args: dict) -> None:
         recipient = str(args.get("to", "")).strip().lower()
-        body = f"{args.get('subject', '')}\n{args.get('body', '')}"
+        body = json.dumps(args, ensure_ascii=False, default=str)
         if "@" not in recipient:
             decision.add("deny", "medium", "invalid_recipient")
             return
@@ -357,7 +794,10 @@ class PolicyEngine:
             decision.add("deny", "high", "external_directory_not_authorized")
         if not normalized.exists() or not normalized.is_dir():
             decision.add("deny", "medium", "directory_not_found")
-        if decision.action != "deny":
+        if decision.action != "deny" and not self._is_within(
+            normalized,
+            self.workspace,
+        ):
             decision.add("ask", "medium", "desktop_application_launch")
             decision.add("ask", "medium", "user_confirmation_required")
 
@@ -482,7 +922,10 @@ class PolicyEngine:
 
     @classmethod
     def contains_secret(cls, text: str) -> bool:
-        return any(pattern.search(text) for pattern in cls.SECRET_PATTERNS)
+        return bool(
+            any(pattern.search(text) for pattern in cls.SECRET_PATTERNS)
+            or any(pattern.search(text) for pattern in TaintTracker.SECRET_RES)
+        )
 
     def describe(self) -> list[dict]:
         return [

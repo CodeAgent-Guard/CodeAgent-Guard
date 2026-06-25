@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-06-24T14:54:43.434855+00:00",
+  "git_commit": "79f0de15f3942a29b8002ca3165b6c3ae84921e5",
+  "git_status_short": "M .gitignore\n M README.md\n M data/evaluation/experiment_report.md\n D data/restore-backup-path.txt\n M docs/ARCHITECTURE.md\n M frontend/app.js\n M frontend/index.html\n M frontend/styles.css\n M guard/adapters.py\n M guard/agent.py\n M guard/audit.py\n M guard/contracts.py\n M guard/executors.py\n M guard/policy.py\n M guard/tools.py\n M guard/transparency.py\n M opencode/tool-proxy-plugin.js\n M reports/implementation_status.md\n M server.py\n M tests/test_guard.py\n?? 1}))\n?? benchmarks/\n?? docs/CT_TRM.md\n?? frontend/assets/\n?? guard/chain_risk.py\n?? guard/ct_trm_evaluation.py\n?? guard/evaluation_ct_trm.py\n?? guard/evaluation_generalization.py\n?? guard/network_safety.py\n?? guard/provenance.py\n?? guard/risk_model.py\n?? guard/risk_patterns.py\n?? guard/state.py\n?? guard/taint.py\n?? guard/task_budget.py\n?? reports/benchmark_jsonl/\n?? reports/competition_project_overview.md\n?? reports/ct_trm/\n?? reports/ct_trm_evaluation.json\n?? reports/ct_trm_evaluation.md\n?? reports/final/\n?? reports/generalization/\n?? reports/opencode_validation.json\n?? reports/opencode_validation.md\n?? reports/real_agent_validation.json\n?? reports/real_agent_validation.md\n?? reports/redteam/\n?? reports/stability/\n?? run_ct_trm_evaluation.py\n?? scripts/\n?? tests/test_agent_tool_bench.py\n?? tests/test_approval_concurrency.py\n?? tests/test_benchmark_calibration.py\n?? tests/test_chain_risk.py\n?? tests/test_ct_trm_risk_model.py\n?? tests/test_policy_ct_trm_integration.py\n?? tests/test_provenance_matching.py\n?? tests/test_runtime_state.py\n?? tests/test_taint_extraction.py\n?? tests/test_task_budget.py",
+  "policy_files": {
+    "guard/policy.py": {
+      "sha256": "ce327263e0a905adefa4daab811718836ba1fca4e5a18d4a2217e7f21b0053f3",
+      "size_bytes": 37634
+    },
+    "guard/risk_model.py": {
+      "sha256": "3ec537475a29e99886e9f8b4886b3fc58d4e193f2ea2d03a15b76d4d97c7c973",
+      "size_bytes": 18151
+    },
+    "guard/risk_patterns.py": {
+      "sha256": "92be899c2bb39ab06d85cae34b384d5197cd5cea951a8d83e86c6aafdf0440bf",
+      "size_bytes": 16534
+    },
+    "guard/taint.py": {
+      "sha256": "b3639d5f8ca570a5f574e999fbac94b875a5d06898b1435bbb96ad71c48c552c",
+      "size_bytes": 45846
+    },
+    "guard/chain_risk.py": {
+      "sha256": "4ef7741983b4e6d5071547d32c5cebf171eb556de2f7a8b299549d23d85f96eb",
+      "size_bytes": 18786
+    },
+    "guard/task_budget.py": {
+      "sha256": "51bd0c6b8c84c8b7de8be536f7d06e081427e442cbe4a127ccc88e50dabd6085",
+      "size_bytes": 10389
+    }
+  },
+  "policy_snapshot_hash": "fe9481859311f10776dfc0d77d529819467f5e68c69d8b1e1c6380e685e6de59"
+}

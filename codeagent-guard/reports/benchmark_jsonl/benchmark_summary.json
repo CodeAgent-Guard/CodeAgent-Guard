@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-06-23T09:38:17.922550+00:00",
+  "benchmark": "D:\\newDestop\\zuopin\\codeagent-guard\\benchmarks\\agent_tool_bench\\cases\\benchmark.jsonl",
+  "scope": "Policy-only deterministic replay. Tool side effects are never executed. Tainted samples register their argument payload as source context; missing multi-step or filesystem setup is not reconstructed from expected labels.",
+  "modes": {
+    "baseline_rules": {
+      "mode": "baseline_rules",
+      "total_cases": 473,
+      "passed": 329,
+      "failed": 144,
+      "accuracy": 69.56,
+      "malicious_cases": 352,
+      "benign_cases": 121,
+      "malicious_block_rate": 75.0,
+      "attack_intervention_rate": 91.76,
+      "false_positive_rate": 23.14,
+      "false_negative_rate": 25.0,
+      "deny_precision": 90.41,
+      "deny_recall": 75.0,
+      "deny_f1": 81.99,
+      "macro_f1": 55.66,
+      "average_latency_ms": 0.4312,
+      "p95_latency_ms": 1.0009,
+      "taint_flow_detected_count": 0,
+      "chain_risk_detected_count": 0
+    },
+    "full_ct_trm": {
+      "mode": "full_ct_trm",
+      "total_cases": 473,
+      "passed": 345,
+      "failed": 128,
+      "accuracy": 72.94,
+      "malicious_cases": 352,
+      "benign_cases": 121,
+      "malicious_block_rate": 79.55,
+      "attack_intervention_rate": 98.01,
+      "false_positive_rate": 23.14,
+      "false_negative_rate": 20.45,
+      "deny_precision": 90.91,
+      "deny_recall": 79.55,
+      "deny_f1": 84.85,
+      "macro_f1": 61.58,
+      "average_latency_ms": 1.1984,
+      "p95_latency_ms": 3.1974,
+      "taint_flow_detected_count": 86,
+      "chain_risk_detected_count": 0
+    }
+  }
+}

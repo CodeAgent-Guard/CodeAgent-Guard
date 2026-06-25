@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from email.message import Message
+from io import BytesIO
 import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 from guard.adapters import OpenCodeToolProxyAdapter
@@ -12,6 +15,7 @@ from guard.audit import AuditStore
 from guard.contracts import ToolCall
 from guard.evaluation import EvaluationService, generate_cases
 from guard.executors import ToolExecutorRegistry
+from guard.network_safety import NetworkTargetError
 from guard.policy import PolicyEngine
 from guard.providers import LLMProvider
 from guard.tools import ToolProxy
@@ -60,6 +64,26 @@ class PolicyTests(unittest.TestCase):
         result = self.policy.evaluate("http_request", {"url": "http://127.0.0.1/admin"})
         self.assertEqual(result.action, "deny")
         self.assertIn("ssrf_private_network", result.reasons)
+
+    def test_public_test_domain_does_not_use_real_dns(self) -> None:
+        with patch("guard.network_safety.socket.getaddrinfo") as resolver:
+            result = self.policy.evaluate(
+                "http_request",
+                {"url": "https://public.example.test/data"},
+            )
+        self.assertEqual(result.action, "allow")
+        resolver.assert_not_called()
+
+    def test_task_misalignment_requires_confirmation_not_denial(self) -> None:
+        result = self.policy.evaluate(
+            "http_request",
+            {"url": "https://public.example.test/data"},
+            source="agent",
+            trace_id="task-mismatch",
+            task="Read and summarize the local README",
+        )
+        self.assertEqual(result.action, "ask")
+        self.assertIn("task_tool_misalignment", result.reasons)
 
     def test_external_email_requires_confirmation(self) -> None:
         result = self.policy.evaluate("send_email", {
@@ -333,6 +357,37 @@ class PolicyTests(unittest.TestCase):
 
 
 class ExecutorTests(unittest.TestCase):
+    def test_http_redirect_to_metadata_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            executor = ToolExecutorRegistry(workspace, root / "outbox")
+            headers = Message()
+            headers["Location"] = "http://169.254.169.254/latest/meta-data/"
+            redirect = HTTPError(
+                "https://public.example.test/start",
+                302,
+                "Found",
+                headers,
+                BytesIO(b""),
+            )
+
+            class RedirectingOpener:
+                def open(self, request, timeout):
+                    raise redirect
+
+            with patch(
+                "guard.executors.urllib.request.build_opener",
+                return_value=RedirectingOpener(),
+            ):
+                with self.assertRaises(NetworkTargetError) as caught:
+                    executor.execute(
+                        "http_request",
+                        {"url": "https://public.example.test/start"},
+                    )
+            self.assertEqual(caught.exception.reason, "ssrf_private_network")
+
     def test_open_directory_launches_windows_explorer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -721,6 +776,11 @@ class FrontendPresentationTests(unittest.TestCase):
         self.assertIn('id="trusted-workspace-path"', page)
         self.assertIn("/api/trusted-workspaces", app)
         self.assertIn('<details class="conversation-turn', app)
+        self.assertIn("ctTrmHtml", app)
+        self.assertIn("ct_trm_assessment", app)
+        self.assertIn("/api/evaluation/agent-tool-bench/run", app)
+        self.assertIn('id="task-budget-auto"', page)
+        self.assertIn('id="ct-eval-modes"', page)
 
 
 class AgentTransparencyTests(unittest.TestCase):
@@ -1250,8 +1310,9 @@ class AgentTransparencyTests(unittest.TestCase):
             self.assertEqual(
                 phases,
                 [
-                    "user_task", "task_authorization", "agent_plan", "policy_decision",
-                    "tool_action", "audit_record", "agent_synthesis",
+                    "user_task", "task_authorization", "agent_plan",
+                    "ct_trm_assessment", "policy_decision", "tool_action",
+                    "audit_record", "agent_synthesis",
                     "final_answer",
                 ],
             )

@@ -175,6 +175,9 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 if allowed_tools is not None
                 else self.DEFAULT_ALLOWED_POLICY_TOOLS
             ),
+            conversation_id=str(
+                (metadata or {}).get("session_id") or trace_id
+            ),
             call_id=call_id or f"call-{uuid.uuid4().hex[:12]}",
         ))
         result["opencode"] = {

@@ -1,0 +1,7 @@
+﻿dataset,category,total,passed,allow,ask,deny,false_positive,false_negative
+redteam_unseen,context_pollution,25,25,0,0,25,0,0
+redteam_unseen,dangerous_shell,25,25,0,0,25,0,0
+redteam_unseen,package_script_indirect,25,25,0,0,25,0,0
+redteam_unseen,secret_exfiltration,25,25,0,0,25,0,0
+redteam_unseen,sensitive_path_escape,25,25,0,0,25,0,0
+redteam_unseen,ssrf_and_private_network,25,25,0,0,25,0,0

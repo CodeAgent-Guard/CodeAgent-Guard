@@ -45,20 +45,34 @@ class AuditStore:
                     result_summary TEXT NOT NULL,
                     latency_ms REAL NOT NULL,
                     prev_hash TEXT NOT NULL,
-                    hash TEXT NOT NULL UNIQUE
+                    hash TEXT NOT NULL UNIQUE,
+                    ct_trm_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(audit_events)").fetchall()
+            }
+            if "ct_trm_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN ct_trm_json TEXT NOT NULL DEFAULT '{}'"
+                )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit_events(trace_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_events(timestamp)")
             conn.commit()
 
     def append(self, *, trace_id: str, task: str, tool: str, args: dict,
                decision: str, risk_level: str, reasons: list[str], source: str,
-               tainted: bool, result_summary: str, latency_ms: float) -> dict:
+               tainted: bool, result_summary: str, latency_ms: float,
+               ct_trm: dict | None = None) -> dict:
         with self.lock, closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             last = conn.execute("SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1").fetchone()
             prev_hash = last["hash"] if last else "GENESIS"
             timestamp = datetime.now(timezone.utc).isoformat()
+            normalized_latency = round(float(latency_ms), 3)
+            normalized_summary = str(result_summary)[:2000]
             payload = {
                 "timestamp": timestamp,
                 "trace_id": trace_id,
@@ -70,20 +84,24 @@ class AuditStore:
                 "reasons": reasons,
                 "source": source,
                 "tainted": bool(tainted),
-                "result_summary": result_summary,
-                "latency_ms": round(latency_ms, 3),
+                "result_summary": normalized_summary,
+                "latency_ms": normalized_latency,
                 "prev_hash": prev_hash,
             }
+            if ct_trm:
+                payload["ct_trm"] = ct_trm
             event_hash = hashlib.sha256((prev_hash + canonical_json(payload)).encode()).hexdigest()
             cursor = conn.execute("""
                 INSERT INTO audit_events (
                     timestamp, trace_id, task, tool, args_json, decision, risk_level,
-                    reasons_json, source, tainted, result_summary, latency_ms, prev_hash, hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reasons_json, source, tainted, result_summary, latency_ms,
+                    prev_hash, hash, ct_trm_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp, trace_id, task, tool, canonical_json(args), decision, risk_level,
-                canonical_json(reasons), source, int(tainted), result_summary[:2000],
-                latency_ms, prev_hash, event_hash,
+                canonical_json(reasons), source, int(tainted),
+                normalized_summary, normalized_latency, prev_hash, event_hash,
+                canonical_json(ct_trm or {}),
             ))
             conn.commit()
             payload.update({"seq": cursor.lastrowid, "hash": event_hash})
@@ -94,6 +112,7 @@ class AuditStore:
         value = dict(row)
         value["args"] = json.loads(value.pop("args_json"))
         value["reasons"] = json.loads(value.pop("reasons_json"))
+        value["ct_trm"] = json.loads(value.pop("ct_trm_json", "{}"))
         value["tainted"] = bool(value["tainted"])
         return value
 
@@ -167,6 +186,8 @@ class AuditStore:
                 "latency_ms": round(event["latency_ms"], 3),
                 "prev_hash": event["prev_hash"],
             }
+            if event.get("ct_trm"):
+                payload["ct_trm"] = event["ct_trm"]
             calculated = hashlib.sha256((expected_prev + canonical_json(payload)).encode()).hexdigest()
             if event["prev_hash"] != expected_prev or event["hash"] != calculated:
                 return {"valid": False, "events": len(rows), "broken_at": event["seq"]}

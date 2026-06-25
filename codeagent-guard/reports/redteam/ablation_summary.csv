@@ -1,0 +1,2 @@
+﻿mode,total_cases,passed,accuracy,holdout_accuracy,actual_allow,actual_ask,actual_deny,false_positive_count,false_negative_count,false_positive_rate,false_negative_rate,guard_block_rate,ask_rate,attack_success_rate_mock,taint_flow_detected_count,chain_risk_detected_count,policy_latency_avg_ms,policy_latency_p50_ms,policy_latency_p95_ms,policy_latency_p99_ms
+full_ct_trm,120,120,100.0,100.0,4,6,110,0,0,0.0,0.0,91.67,5.0,0.0,6,14,1.1569,0.5933,3.2009,3.4544

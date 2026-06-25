@@ -1,9 +1,10 @@
 ﻿const state = {
   events: [], overview: {}, policies: [], providers: [], tools: [],
-  evaluation: null, currentAgentResult: null, taskToolsInitialized: false,
+  evaluation: null, ctEvaluation: null, currentAgentResult: null, taskToolsInitialized: false,
   traces: [], conversations: [], selectedTraceId: null,
   currentConversation: null,
   trustedWorkspaces: [],
+  approvals: [],
   agentContextId: localStorage.getItem("agentContextId") || null,
   contextMaxChars: Number(localStorage.getItem("agentContextMaxChars") || 20000),
   forceNewContext: false, contextIsFull: false
@@ -21,6 +22,33 @@ const fullDateTime = (iso) => {
   return `${value.getFullYear()}-${pad(value.getMonth()+1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
 };
 const short = (value, n=44) => String(value ?? "").length > n ? String(value).slice(0,n) + "…" : String(value ?? "");
+const setText = (selector, value) => {
+  const node = $(selector);
+  if (node) node.textContent = value;
+};
+const firstDefined = (...values) => values.find(value => value !== undefined && value !== null && value !== "");
+const pct = (value) => {
+  const actual = firstDefined(value, 0);
+  if (typeof actual === "string" && actual.includes("%")) return actual;
+  const number = Number(actual);
+  return Number.isFinite(number) ? `${number}%` : "--";
+};
+const ms = (value) => {
+  const number = Number(firstDefined(value, 0));
+  return Number.isFinite(number) ? `${number} ms` : "--";
+};
+const secondsLeft = (expiresAt) => {
+  const deadline = Number(expiresAt || 0);
+  if (!Number.isFinite(deadline) || deadline <= 0) return null;
+  return Math.max(0, Math.floor(deadline - Date.now() / 1000));
+};
+const durationLabel = (seconds) => {
+  if (seconds === null) return "未设置过期时间";
+  if (seconds <= 0) return "已过期";
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes ? `${minutes}分${String(rest).padStart(2, "0")}秒后过期` : `${rest}秒后过期`;
+};
 
 async function api(path, options={}) {
   const response = await fetch(path, {
@@ -114,7 +142,7 @@ function newAgentContext() {
 function switchView(id) {
   $$(".view").forEach(v => v.classList.toggle("active", v.id === id));
   $$(".nav").forEach(v => v.classList.toggle("active", v.dataset.view === id));
-  const names = {dashboard:"安全总览", agent:"Agent 控制台", evaluation:"评测中心", audit:"审计日志", policies:"策略中心"};
+  const names = {dashboard:"系统总览", agent:"Agent 控制台", evaluation:"评测中心", audit:"审计日志", policies:"策略中心"};
   $("#page-title").textContent = names[id];
 }
 
@@ -123,7 +151,7 @@ function renderOverview() {
   $("#metric-calls").textContent = o.calls || 0;
   $("#metric-blocked").textContent = o.blocked || 0;
   $("#metric-rate").textContent = `阻断率 ${o.block_rate || 0}%`;
-  $("#metric-latency").textContent = o.avg_latency_ms || 0;
+  $("#metric-latency").textContent = ms(o.avg_latency_ms || 0);
   $("#metric-chain").textContent = o.chain?.valid ? "VALID" : "BROKEN";
   $("#metric-chain").style.color = o.chain?.valid ? "var(--green)" : "var(--red)";
   $("#chain-count").textContent = `${o.chain?.events || 0} 个事件已校验`;
@@ -133,6 +161,8 @@ function renderOverview() {
 
   const risks = {critical:0, high:0, medium:0, low:0, ...(o.risks || {})};
   const total = Object.values(risks).reduce((a,b)=>a+b,0);
+  const ctEvidence = state.events.filter(event => event.ct_trm && Object.keys(event.ct_trm).length).length;
+  $("#metric-ct-findings").textContent = Math.max(ctEvidence, risks.critical + risks.high + risks.medium);
   $("#risk-total").textContent = total;
   let angle = 0;
   const critical = total ? risks.critical/total*360 : 0; angle += critical;
@@ -451,7 +481,7 @@ function resultFromTurn(turn, conversation) {
 function eventTimelineHtml(result) {
   const icons = {
     user_task:"U", task_authorization:"TA", agent_plan:"AI",
-    policy_decision:"PE", tool_action:"TP", tool_result:"R",
+    ct_trm_assessment:"CT", policy_decision:"PE", tool_action:"TP", tool_result:"R",
     agent_pause:"PA", approval_decision:"OK", agent_resume:"RE",
     audit_record:"AU", agent_synthesis:"S", final_answer:"END"
   };
@@ -465,6 +495,7 @@ function eventTimelineHtml(result) {
           <button class="reject-button" data-approval="${esc(event.details.approval_id)}" data-approve="false">拒绝操作</button>
         </div>`
       : "";
+    const ctTrm = ctTrmHtml(event);
     return `<article class="execution-event phase-${esc(event.phase)} status-${esc(event.status)}">
       <div class="event-rail"><i>${icons[event.phase] || "·"}</i><span></span></div>
       <div class="event-body">
@@ -475,6 +506,7 @@ function eventTimelineHtml(result) {
         </div>
         <h3>${esc(event.title)}</h3>
         <p>${esc(event.summary)}</p>
+        ${ctTrm}
         ${approval}
         <details>
           <summary>查看透明详情</summary>
@@ -483,6 +515,57 @@ function eventTimelineHtml(result) {
       </div>
     </article>`;
   }).join("");
+}
+
+function ctTrmHtml(event) {
+  if (event.phase !== "ct_trm_assessment") return "";
+  const details = event.details || {};
+  const patterns = (details.risk_patterns || []).map(pattern =>
+    `<span title="${esc(pattern.name || "")}">${esc(pattern.pattern_id || "")}</span>`
+  ).join("");
+  const reasons = (details.reasons || []).slice(0, 8).map(reason =>
+    `<code>${esc(reason)}</code>`
+  ).join("");
+  const sources = [...new Set((details.taint_matches || []).map(item => item.source).filter(Boolean))]
+    .slice(0, 4)
+    .map(source => `<span>${esc(source)}</span>`)
+    .join("");
+  const budget = details.task_budget || {};
+  return `<div class="ct-trm-card">
+    <div class="ct-trm-metrics">
+      <b><small>SCORE</small>${Number(details.total_score || 0)}</b>
+      <b><small>HARD DENY</small>${details.hard_deny ? "YES" : "NO"}</b>
+      <b><small>TAINT FLOWS</small>${(details.taint_matches || []).length}</b>
+      <b><small>CHAIN RISKS</small>${(details.chain_findings || []).length}</b>
+    </div>
+    ${patterns ? `<div class="ct-trm-row"><small>PATTERNS</small><div class="ct-patterns">${patterns}</div></div>` : ""}
+    ${reasons ? `<div class="ct-trm-row"><small>REASONS</small><div class="ct-reasons">${reasons}</div></div>` : ""}
+    ${sources ? `<div class="ct-trm-row"><small>SOURCES</small><div class="ct-sources">${sources}</div></div>` : ""}
+    ${budget.max_side_effect ? `<div class="ct-trm-row"><small>TASK BUDGET</small><strong>${esc(budget.max_side_effect)}</strong><em>${esc((budget.likely_tools || []).join(", "))}</em></div>` : ""}
+  </div>`;
+}
+
+function ctTrmAuditSummary(details) {
+  if (!details || !Object.keys(details).length) return "";
+  const patterns = (details.risk_patterns || details.patterns || [])
+    .slice(0, 6)
+    .map(pattern => `<span>${esc(pattern.pattern_id || pattern.id || pattern.name || pattern)}</span>`)
+    .join("");
+  const reasons = (details.reasons || [])
+    .slice(0, 6)
+    .map(reason => `<code>${esc(reason)}</code>`)
+    .join("");
+  return `<div class="detail-block full ct-audit-summary">
+    <label>CT-TRM 摘要</label>
+    <div class="ct-audit-grid">
+      <b><small>SCORE</small>${esc(firstDefined(details.total_score, details.score, 0))}</b>
+      <b><small>HARD DENY</small>${details.hard_deny ? "YES" : "NO"}</b>
+      <b><small>TAINT</small>${(details.taint_matches || []).length}</b>
+      <b><small>CHAIN</small>${(details.chain_findings || []).length}</b>
+    </div>
+    ${patterns ? `<div class="ct-audit-row"><small>PATTERNS</small><div>${patterns}</div></div>` : ""}
+    ${reasons ? `<div class="ct-audit-row"><small>REASONS</small><div>${reasons}</div></div>` : ""}
+  </div>`;
 }
 
 function renderConversationThread(conversation, pendingResult=null) {
@@ -567,9 +650,47 @@ function applyProviderPreset(overwrite=true) {
   $("#provider-note").textContent = `${preset.protocol.toUpperCase()} · ${preset.note}`;
 }
 
+function renderDashboardBasicEvaluation(report) {
+  if (!report) return;
+  setText("#dashboard-eval-accuracy", pct(report.accuracy));
+  setText("#dashboard-p95", ms(report.p95_latency_ms));
+}
+
+function renderDashboardCtEvaluation(report) {
+  const full = report?.modes?.full_ct_trm || report?.full_ct_trm || report;
+  if (!full) return;
+  setText("#dashboard-eval-accuracy", pct(full.accuracy));
+  setText("#dashboard-strong-block", pct(firstDefined(full.strong_block_rate, full.malicious_block_rate, full.defense_block_rate)));
+  setText("#dashboard-intervention", pct(firstDefined(full.attack_intervention_rate, full.attack_block_or_ask_rate)));
+  setText("#dashboard-fn", pct(firstDefined(full.complete_false_negative_rate, full.complete_miss_rate, full.false_negative_rate)));
+  setText("#dashboard-disruption", pct(firstDefined(full.normal_task_disruption_rate, full.false_positive_rate)));
+  setText("#dashboard-p95", ms(firstDefined(full.policy_latency_p95_ms, full.p95_latency_ms)));
+
+  const total = Number(firstDefined(full.total_cases, full.total, 0));
+  const decisions = [
+    ["ALLOW", Number(firstDefined(full.actual_allow, 0)), "allow"],
+    ["ASK", Number(firstDefined(full.actual_ask, 0)), "ask"],
+    ["DENY", Number(firstDefined(full.actual_deny, 0)), "deny"],
+  ].filter(([, count]) => count > 0);
+  const node = $("#dashboard-category-breakdown");
+  if (!node) return;
+  if (!decisions.length) {
+    node.innerHTML = `
+      <div><span>Direct Attack</span><i style="width:78%"></i><b>DENY</b></div>
+      <div><span>Safe Workspace</span><i style="width:58%"></i><b>ALLOW</b></div>
+      <div><span>Gray Zone</span><i style="width:42%"></i><b>ASK</b></div>`;
+    return;
+  }
+  node.innerHTML = decisions.map(([label, count, cls]) => {
+    const width = total ? Math.max(6, count / total * 100) : 0;
+    return `<div class="${cls}"><span>${label}</span><i style="width:${width}%"></i><b>${count}</b></div>`;
+  }).join("");
+}
+
 function renderEvaluation(report) {
   if (!report?.available && report?.total === undefined) return;
   state.evaluation = report;
+  renderDashboardBasicEvaluation(report);
   $("#eval-accuracy").textContent = `${report.accuracy}%`;
   $("#eval-summary").textContent = `${report.passed}/${report.total} 通过 · ${report.failed} 失败`;
   $("#eval-passed").textContent = report.passed;
@@ -591,10 +712,50 @@ function renderEvaluation(report) {
     : "全部 100 条用例符合预期。";
 }
 
+function renderCtEvaluation(report) {
+  if (!report?.available && !report?.modes) return;
+  state.ctEvaluation = report;
+  renderDashboardCtEvaluation(report);
+  const modes = report.modes || {};
+  const modeOrder = [
+    "no_guard_mock",
+    "baseline_rules",
+    "rules_plus_source",
+    "rules_plus_taint",
+    "ct_trm_without_chain",
+    "full_ct_trm"
+  ];
+  const modeLabels = {
+    no_guard_mock: "NO GUARD",
+    baseline_rules: "BASELINE RULES",
+    rules_plus_source: "RULES + SOURCE",
+    rules_plus_taint: "RULES + TAINT",
+    ct_trm_without_chain: "CT-TRM NO CHAIN",
+    full_ct_trm: "FULL CT-TRM"
+  };
+  const node = $("#ct-eval-modes");
+  node.className = "ct-eval-modes";
+  node.innerHTML = modeOrder.map(mode => {
+    const item = modes[mode] || {};
+    return `<div class="ct-eval-mode ${mode === "full_ct_trm" ? "full" : ""}">
+      <span>${esc(modeLabels[mode])}</span>
+      <strong>${item.accuracy ?? 0}%</strong>
+      <small>${item.passed ?? 0}/${item.total_cases ?? 0} · HOLDOUT ${item.holdout_accuracy ?? 0}% · FP ${item.false_positive_count ?? 0} · FN ${item.false_negative_count ?? 0}</small>
+      <div><b>A ${item.actual_allow ?? 0}</b><b>Q ${item.actual_ask ?? 0}</b><b>D ${item.actual_deny ?? 0}</b><b>${item.policy_latency_p95_ms ?? 0} ms P95</b></div>
+    </div>`;
+  }).join("");
+  const full = modes.full_ct_trm || {};
+  $("#ct-eval-status").textContent = `${full.passed ?? 0}/${full.total_cases ?? 0} · ${full.accuracy ?? 0}%`;
+}
+
 function showDetail(seq) {
   const e = state.events.find(item => item.seq === Number(seq));
   if (!e) return;
   $("#detail-title").textContent = `${e.tool} · ${e.decision.toUpperCase()}`;
+  const ctSummary = ctTrmAuditSummary(e.ct_trm || {});
+  const ctTrm = e.ct_trm && Object.keys(e.ct_trm).length
+    ? `<div class="detail-block full"><label>CT-TRM 风险评估</label><pre>${esc(JSON.stringify(e.ct_trm,null,2))}</pre></div>`
+    : "";
   $("#detail-content").innerHTML = `<div class="detail-grid">
     <div class="detail-block"><label>TRACE ID</label><div>${esc(e.trace_id)}</div></div>
     <div class="detail-block"><label>风险 / 决策</label><div>${e.risk_level.toUpperCase()} · ${e.decision.toUpperCase()}</div></div>
@@ -605,18 +766,78 @@ function showDetail(seq) {
     <div class="detail-block"><label>PREV HASH</label><div>${esc(e.prev_hash)}</div></div>
     <div class="detail-block"><label>EVENT HASH</label><div>${esc(e.hash)}</div></div>
     <div class="detail-block full"><label>执行结果</label><pre>${esc(e.result_summary)}</pre></div>
+    ${ctSummary}
+    ${ctTrm}
   </div>`;
   $("#detail-modal").classList.add("open");
 }
 
+function renderApprovals(approvals = state.approvals) {
+  state.approvals = approvals || [];
+  const node = $("#pending-approvals");
+  const count = $("#approval-count");
+  if (!node || !count) return;
+  count.textContent = String(state.approvals.length);
+  setText("#metric-approvals", String(state.approvals.length));
+  if (!state.approvals.length) {
+    node.className = "pending-approvals empty-state";
+    node.textContent = "当前没有等待审批的操作";
+    return;
+  }
+  node.className = "pending-approvals";
+  node.innerHTML = state.approvals.map(item => {
+    const delegated = !!item.execution_delegated;
+    const status = String(item.status || "pending").toLowerCase();
+    const remaining = secondsLeft(item.expires_at);
+    const expired = remaining === 0 || status === "expired";
+    const expiring = remaining !== null && remaining > 0 && remaining <= 120;
+    const allowedTools = item.allowed_tools?.length ? item.allowed_tools.join(", ") : item.tool;
+    const statusText = expired ? "EXPIRED" : status.toUpperCase();
+    return `<article class="approval-item ${delegated ? "delegated" : "builtin"} ${expiring ? "expiring" : ""} ${expired ? "expired" : ""}">
+      <div class="approval-item-main">
+        <div class="approval-item-meta">
+          <span>${delegated ? "OPENCODE" : "BUILT-IN AGENT"}</span>
+          <span class="approval-source">${esc(item.source || "agent")}</span>
+          ${item.tainted ? `<span class="approval-taint">TAINTED</span>` : ""}
+          <span class="approval-status">${esc(statusText)}</span>
+          <time>${esc(item.created_at ? dateTime(item.created_at) : "")}</time>
+        </div>
+        <h3>${esc(item.tool)}</h3>
+        <p>${esc(item.task || "未记录任务描述")}</p>
+        <div class="approval-facts">
+          <span><b>Trace</b>${esc(item.trace_id)}</span>
+          <span><b>Call</b>${esc(item.call_id || "—")}</span>
+          <span><b>Scope</b>${esc(allowedTools || "—")}</span>
+          <span class="${expiring ? "deadline warn" : expired ? "deadline danger" : "deadline"}"><b>TTL</b>${esc(durationLabel(remaining))}</span>
+        </div>
+        <pre>${esc(JSON.stringify(item.args || {}, null, 2))}</pre>
+        <small>${esc(item.agent_id)} · ${esc(item.trace_id)} · ${esc(item.approval_id)}</small>
+      </div>
+      <div class="approval-item-actions">
+        <button class="approve-button" data-approval="${esc(item.approval_id)}" data-approve="true" ${expired ? "disabled" : ""}>
+          ${delegated ? "批准并继续 OpenCode" : "批准并执行"}
+        </button>
+        <button class="reject-button" data-approval="${esc(item.approval_id)}" data-approve="false" ${expired ? "disabled" : ""}>拒绝操作</button>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+async function refreshApprovals() {
+  const result = await api("/api/approvals");
+  renderApprovals(result.approvals || []);
+}
+
 async function refresh() {
   try {
-    const [overview, audit, policies, health, providers, tools, evaluation, traces, conversations, trusted] = await Promise.all([
+    const [overview, audit, policies, health, providers, tools, evaluation, ctEvaluation, traces, conversations, trusted, approvals] = await Promise.all([
       api("/api/overview"), api("/api/audit?limit=500"), api("/api/policies"), api("/api/health"),
       api("/api/llm/providers"), api("/api/tools"), api("/api/evaluation"),
+      api("/api/evaluation/agent-tool-bench"),
       api("/api/traces?limit=100&agent_id=builtin-agent"),
       api("/api/agent/conversations?limit=100"),
-      api("/api/trusted-workspaces")
+      api("/api/trusted-workspaces"),
+      api("/api/approvals")
     ]);
     state.overview = overview;
     state.events = audit.events;
@@ -629,8 +850,9 @@ async function refresh() {
     $("#build-label").textContent = health.build || "unknown build";
     renderAuditSessionFilter();
     renderOverview(); renderTimeline(); renderAlerts(); renderAudit(); renderPolicies();
-    renderTools(); renderProviders(providers.current); renderEvaluation(evaluation);
+    renderTools(); renderProviders(providers.current); renderEvaluation(evaluation); renderCtEvaluation(ctEvaluation);
     renderTrustedWorkspaces(trusted);
+    renderApprovals(approvals.approvals || []);
     renderAgentHistory();
     renderContextStatus();
     if (traces.traces?.length) {
@@ -643,18 +865,15 @@ async function refresh() {
 function renderDynamicFlow(trace) {
   const node = $("#control-flow");
   if (!node || !trace?.events?.length) return;
-  const phaseMap = [
-    ["user_task", "U", "用户任务", "Prompt"],
-    ["agent_plan", "AI", trace.agent_id || "Agent", "Tool Request"],
-    ["policy_decision", "PE", "Policy Engine", "Allow · Ask · Deny"],
-    ["tool_action", "TP", "Tool Proxy", "Controlled Action"],
-    ["audit_record", "AU", "Audit Chain", "SHA-256"],
-  ];
-  const present = phaseMap.filter(([phase]) => trace.events.some(event => event.phase === phase));
+  const eventFor = (phase) => [...trace.events].reverse().find(item => item.phase === phase);
   const policyEvents = trace.events.filter(event => event.phase === "policy_decision");
+  const latestPolicy = [...policyEvents].reverse()[0];
+  const decision = String(
+    firstDefined(latestPolicy?.status, latestPolicy?.details?.decision, latestPolicy?.details?.action, "")
+  ).toLowerCase();
   const riskOrder = {low:0, medium:1, high:2, critical:3};
   const risk = policyEvents.reduce(
-    (highest, event) => riskOrder[event.details?.risk_level] > riskOrder[highest]
+    (highest, event) => riskOrder[event.details?.risk_level || "low"] > riskOrder[highest]
       ? event.details.risk_level : highest,
     "low"
   );
@@ -666,11 +885,32 @@ function renderDynamicFlow(trace) {
   $("#latest-risk").textContent = risk.toUpperCase();
   $("#latest-risk").style.color = risk === "critical" || risk === "high" ? "var(--red)" : risk === "medium" ? "var(--amber)" : "var(--green)";
   $("#latest-call-count").textContent = `${toolCalls} / ${blocked}`;
-  node.innerHTML = present.map(([phase, icon, title, subtitle], index) => {
-    const event = [...trace.events].reverse().find(item => item.phase === phase);
-    const riskClass = event?.status === "deny" ? " shield" : phase === "tool_action" ? " active" : "";
-    const flowNode = `<div class="flow-node${riskClass}"><span>${String(index+1).padStart(2,"0")}</span><i>${icon}</i><b>${esc(title)}</b><small>${esc(subtitle)} · ${esc(event?.status || "active")}</small></div>`;
-    return index < present.length - 1 ? `${flowNode}<div class="flow-line"><em></em></div>` : flowNode;
+
+  const nodes = [
+    {phase:"agent_plan", icon:"AG", title: trace.agent_id?.toLowerCase().includes("opencode") ? "OpenCode" : "Agent / OpenCode", subtitle:"Tool intent"},
+    {phase:"tool_action", icon:"TP", title:"Tool Proxy", subtitle:"Gateway"},
+    {phase:"policy_decision", icon:"PE", title:"Policy Engine", subtitle:"Rules"},
+    {phase:"ct_trm_assessment", icon:"CT", title:"CT-TRM", subtitle:"Risk evidence"},
+    {phase:"decision", icon:"A/D", title:"Allow · Ask · Deny", subtitle: decision || "pending"},
+    {phase:"tool_result", icon:"EX", title:"Executor", subtitle:"Controlled action"},
+    {phase:"audit_record", icon:"AU", title:"Audit Chain", subtitle:"SHA-256"},
+  ];
+
+  node.innerHTML = nodes.map((item, index) => {
+    const event = item.phase === "decision" ? latestPolicy : eventFor(item.phase);
+    const hasEvent = !!event || (item.phase === "decision" && !!decision);
+    let classes = hasEvent ? " active" : " waiting";
+    if (item.phase === "decision") {
+      if (decision === "deny") classes += " blocked";
+      else if (decision === "ask") classes += " ask";
+      else if (decision === "allow") classes += " allow";
+    } else if (event?.status === "deny") {
+      classes += " blocked";
+    }
+    const status = item.phase === "decision" ? (decision || "pending") : (event?.status || (hasEvent ? "recorded" : "waiting"));
+    const flowNode = `<div class="flow-node${classes}"><span>${String(index+1).padStart(2,"0")}</span><i>${item.icon}</i><b>${esc(item.title)}</b><small>${esc(item.subtitle)} · ${esc(status)}</small></div>`;
+    const lineClass = decision === "deny" && index >= 3 ? " blocked" : index === 1 ? " guarded" : "";
+    return index < nodes.length - 1 ? `${flowNode}<div class="flow-line${lineClass}"><em></em>${index === 1 ? "<label>policy gate</label>" : ""}</div>` : flowNode;
   }).join("");
 }
 
@@ -718,6 +958,22 @@ async function runEvaluation() {
   finally { button.disabled = false; button.textContent = "运行评测"; }
 }
 
+async function runCtTrmEvaluation() {
+  const button = $("#run-ct-trm-evaluation");
+  button.disabled = true;
+  button.textContent = "500 条六模式评测中…";
+  try {
+    const report = await api("/api/evaluation/agent-tool-bench/run", {method:"POST", body:"{}"});
+    renderCtEvaluation(report);
+    toast(`AgentToolBench 完整模式准确率 ${report.modes?.full_ct_trm?.accuracy ?? 0}%`);
+  } catch (error) {
+    toast(`AgentToolBench 评测失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "运行 500 条六模式评测";
+  }
+}
+
 async function runScenario(scenario, button) {
   const original = button.innerHTML;
   button.disabled = true;
@@ -756,8 +1012,11 @@ async function runAgent() {
   button.disabled = true; button.firstChild.textContent = "运行中 ";
   $("#agent-output").innerHTML = `<span class="output-placeholder">LLM 正在规划并调用受控工具…</span>`;
   try {
-    const allowedTools = [...$("#task-tool-auth").querySelectorAll("input:checked")].map(input => input.value);
-    if (!allowedTools.length) throw new Error("请至少授权一个任务工具");
+    const autoBudget = $("#task-budget-auto").checked;
+    const allowedTools = autoBudget
+      ? null
+      : [...$("#task-tool-auth").querySelectorAll("input:checked")].map(input => input.value);
+    if (!autoBudget && !allowedTools.length) throw new Error("请至少授权一个任务工具");
     const contextMaxChars = readContextMax();
     if (state.contextIsFull && !state.forceNewContext) {
       state.agentContextId = null;
@@ -803,7 +1062,7 @@ function renderAgentExecution(result) {
   }
   const icons = {
     user_task:"U", task_authorization:"TA", agent_plan:"AI",
-    policy_decision:"PE", tool_action:"TP", tool_result:"R",
+    ct_trm_assessment:"CT", policy_decision:"PE", tool_action:"TP", tool_result:"R",
     agent_pause:"⏸", approval_decision:"OK", agent_resume:"▶",
     audit_record:"AU", agent_synthesis:"Σ", final_answer:"✓"
   };
@@ -829,6 +1088,7 @@ function renderAgentExecution(result) {
           <button class="reject-button" data-approval="${esc(event.details.approval_id)}" data-approve="false">拒绝操作</button>
         </div>`
       : "";
+    const ctTrm = ctTrmHtml(event);
     return `<article class="execution-event phase-${esc(event.phase)} status-${esc(event.status)}">
       <div class="event-rail"><i>${icons[event.phase] || "·"}</i><span></span></div>
       <div class="event-body">
@@ -839,6 +1099,7 @@ function renderAgentExecution(result) {
         </div>
         <h3>${esc(event.title)}</h3>
         <p>${esc(event.summary)}</p>
+        ${ctTrm}
         ${approval}
         <details>
           <summary>查看透明详情</summary>
@@ -885,6 +1146,16 @@ async function resolveApproval(approvalId, approve) {
       method:"POST",
       body:JSON.stringify({approval_id: approvalId, approve, actor:"dashboard-user"})
     });
+    if (result.execution_delegated) {
+      state.selectedTraceId = result.trace_id;
+      await refresh();
+      toast(
+        approve
+          ? "已批准，OpenCode 正在继续原工具调用"
+          : "已拒绝，OpenCode 原工具调用已终止"
+      );
+      return;
+    }
     if (result.execution_summary) {
       result.read_only = false;
       result.task = result.task || state.currentAgentResult?.task || "";
@@ -954,6 +1225,10 @@ $("#save-provider").addEventListener("click", () => saveProvider(false));
 $("#test-provider").addEventListener("click", () => saveProvider(true));
 $("#generate-cases").addEventListener("click", generateCases);
 $("#run-evaluation").addEventListener("click", runEvaluation);
+$("#run-ct-trm-evaluation").addEventListener("click", runCtTrmEvaluation);
+$("#task-budget-auto").addEventListener("change", event => {
+  $(".manual-tools").classList.toggle("hidden", event.target.checked);
+});
 $("#audit-search").addEventListener("input", renderAudit);
 $("#decision-filter").addEventListener("change", renderAudit);
 $("#audit-session-filter").addEventListener("change", renderAudit);
@@ -972,5 +1247,5 @@ $("#reset-audit").addEventListener("click", async () => {
   await api("/api/audit/reset", {method:"POST", body:"{}"}); await refresh(); toast("审计数据已清空");
 });
 refresh();
+setInterval(() => refreshApprovals().catch(() => {}), 2000);
 setInterval(refresh, 10000);
-

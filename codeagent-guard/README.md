@@ -2,7 +2,12 @@
 
 CodeAgent Guard 是一个面向 AI 编程智能体的工具调用边界控制与风险审计原型。系统不修改大模型本身，而是在 Agent 与文件、命令、网络和邮件等工具之间设置统一的 Tool Proxy，对每次工具调用执行策略判定、审批、阻断、审计和可视化。
 
+当前版本已集成 **CT-TRM（Context-Taint Tool Risk Model）**，在原有参数规则之上增加来源建模、安全实体抽取、参数溯源、污染传播、任务能力预算、跨工具调用链检测和固定可解释风险评分。详细设计见 [`docs/CT_TRM.md`](docs/CT_TRM.md)。
+
 本项目按“信安赛作品”第一阶段要求实现，推荐运行环境为 **Windows 10/11 + WSL2 + Ubuntu**。
+
+参赛项目全貌、实测指标、演示流程和当前边界见
+[`reports/competition_project_overview.md`](reports/competition_project_overview.md)。
 
 ## 1. 接收方先看这里
 
@@ -12,9 +17,9 @@ Windows 目录用于保存或解压交付包，程序实际在 WSL Ubuntu 中运
 
 ```text
 Windows 交付目录
-例如 D:\newDestop\zuopin\codeagent-guard
+例如 D:\projects\codeagent-guard
                 │
-                │ WSL 映射为 /mnt/d/newDestop/zuopin/codeagent-guard
+                │ WSL 映射为 /mnt/d/projects/codeagent-guard
                 ▼
 复制到 Ubuntu：/opt/codeagent-guard
                 │
@@ -69,7 +74,7 @@ wsl --install -d Ubuntu
 
 | Windows 路径 | WSL 路径 |
 |---|---|
-| `D:\newDestop\zuopin\codeagent-guard` | `/mnt/d/newDestop/zuopin/codeagent-guard` |
+| `D:\projects\codeagent-guard` | `/mnt/d/projects/codeagent-guard` |
 | `D:\desktop\ZUOPIN\codeagent-guard` | `/mnt/d/desktop/ZUOPIN/codeagent-guard` |
 
 打开 Ubuntu，执行：
@@ -234,13 +239,13 @@ ip route | awk '/default/ {print $3}'
 管理员必须在 `.env` 中配置可打开的目录，例如：
 
 ```dotenv
-GUARD_OPEN_DIRECTORY_ROOTS=/mnt/c/Users/33834/Desktop,/mnt/d/desktop,/mnt/d/newDestop
+GUARD_OPEN_DIRECTORY_ROOTS=/mnt/c/Users/demo/Desktop,/mnt/d/trusted-workspace
 ```
 
 也可以填写 Windows 路径；多个目录使用英文逗号分隔：
 
 ```dotenv
-GUARD_OPEN_DIRECTORY_ROOTS='C:\Users\33834\Desktop,D:\desktop'
+GUARD_OPEN_DIRECTORY_ROOTS='C:\Users\demo\Desktop,D:\trusted-workspace'
 ```
 
 修改后重启服务并刷新页面。前端默认会勾选 `open_directory`；如果浏览器仍显示旧页面，按 `Ctrl+F5` 强制刷新。使用时：
@@ -260,7 +265,7 @@ GUARD_OPEN_DIRECTORY_ROOTS='C:\Users\33834\Desktop,D:\desktop'
 `GUARD_EXTERNAL_WRITE_ROOTS`：
 
 ```dotenv
-GUARD_EXTERNAL_WRITE_ROOTS=/mnt/c/Users/33834/Desktop,/mnt/d/desktop,/mnt/d/newDestop
+GUARD_EXTERNAL_WRITE_ROOTS=/mnt/c/Users/demo/Desktop,/mnt/d/trusted-workspace
 ```
 
 该配置只扩展授权目录内的基础文件/目录 CRUD：
@@ -522,7 +527,7 @@ cd /opt/codeagent-guard
 python3 -m unittest discover -s tests -v
 ```
 
-当前项目包含 30 项单元测试。
+当前项目包含 104 项单元测试。
 
 ### 7.2 生成 100 条策略用例
 
@@ -558,6 +563,57 @@ python3 run_attack_suite.py
 ```text
 data/evaluation/attack_suite_result.json
 ```
+
+### 7.5 运行 CT-TRM 消融评测
+
+```bash
+python3 run_ct_trm_evaluation.py
+```
+
+评测使用 50 条离线样本，对比 `baseline_rules`、`rules_plus_source` 和
+`full_ct_trm`，不会执行工具、访问网络或发送邮件。结果保存在：
+
+```text
+reports/ct_trm_evaluation.json
+reports/ct_trm_evaluation.md
+```
+
+### 7.6 AgentToolBench 500、红队与稳定性评测
+
+```bash
+python -m benchmarks.agent_tool_bench.generators.generate_ct_trm_cases \
+  --output benchmarks/agent_tool_bench/cases/ct_trm_500.yaml \
+  --count 500 --seed 20260622
+
+python -m benchmarks.agent_tool_bench.generators.validate_cases \
+  --cases benchmarks/agent_tool_bench/cases/ct_trm_500.yaml \
+  --output reports/ct_trm/validation_report.json
+
+python -m guard.evaluation_ct_trm \
+  --cases benchmarks/agent_tool_bench/cases/ct_trm_500.yaml \
+  --all-modes --output-dir reports/ct_trm
+
+python -m guard.evaluation_ct_trm \
+  --cases benchmarks/agent_tool_bench/cases/redteam_bypass.yaml \
+  --mode full_ct_trm --output-dir reports/redteam
+
+python -m benchmarks.agent_tool_bench.real_agent.run_real_agent_validation \
+  --output reports/real_agent_validation.json
+
+python -m benchmarks.agent_tool_bench.real_agent.run_opencode_validation \
+  --output reports/opencode_validation.json
+
+python scripts/stress_ct_trm_policy.py \
+  --output reports/stability/stress_ct_trm_policy.json
+
+python scripts/stress_approval_flow.py \
+  --output reports/stability/stress_approval_flow.json
+
+python scripts/check_report_claims.py reports docs
+```
+
+新评测结果位于 `reports/ct_trm/`、`reports/redteam/`、
+`reports/stability/` 和 `reports/final/`。所有百分比仅描述当前自建评测集。
 
 ## 8. 已实现功能
 
@@ -595,6 +651,9 @@ data/evaluation/attack_suite_result.json
 | 实验评测报告 | 已实现 | `reports/experiment_evaluation.md` |
 | ASR、阻断率、FPR、延迟、审计完整性 | 已实现 | 评测中心和评测结果文件 |
 | 外部 Agent HTTP 接入 | 已实现 | `/api/tools/execute` 和 Trace API |
+| OpenCode 执行前授权插件 | 已实现 | `opencode/tool-proxy-plugin.js` + `/api/opencode/authorize-tool` |
+| CT-TRM 上下文污染风险模型 | 已实现 | 来源、实体、溯源、任务预算、P1-P15、序列风险和固定评分 |
+| CT-TRM 消融评测 | 已实现 | 500 条 AgentToolBench，六种模式对比；保留旧 50 条回归集 |
 
 当前随项目保存的评测结果为：
 
@@ -613,7 +672,7 @@ data/evaluation/attack_suite_result.json
 
 | 项目 | 当前状态 |
 |---|---|
-| 可直接安装的 OpenCode 插件 | 未实现；已有外部 Agent Adapter 和 HTTP 接口 |
+| OpenCode 进程退出后的任务恢复 | 部分实现；Hook 保持运行时可在审批后继续原生调用，若 OpenCode 进程已退出则不能恢复该进程 |
 | MCP Server | 未实现；架构已预留，后续应把 MCP tools 转发到 `ToolProxy.invoke()` |
 | 独立 `scan_secret` 工具 | 未实现；密钥检测已内置于写文件和邮件策略 |
 | 机器学习异常检测 | 未实现；当前是确定性规则策略引擎 |
@@ -622,7 +681,7 @@ data/evaluation/attack_suite_result.json
 | 完整网络隔离 | 未实现；主要依赖策略检测，生产环境仍需网络命名空间和出站规则 |
 | 多用户、登录、RBAC、TLS | 未实现；当前是本地演示服务 |
 | 审计数字签名或外部锚定 | 未实现；当前 SHA-256 链可检测普通事后篡改，但数据库管理员可整体重写链 |
-| 待审批任务持久化 | 未实现；审批队列保存在内存中，服务重启后丢失 |
+| 多节点审批队列 | 未实现；单机审批与 CT-TRM 状态已持久化到 `data/state.db`，多实例仍需共享数据库和租约 |
 | Trace 归档、导出和按用户隔离 | 未实现；当前最多保留最近 500 条 |
 | 默认真实邮件发送 | 未启用；未配置 SMTP 时只写入 `data/outbox/` |
 | 生产级高可用部署 | 未实现；当前使用 Python `ThreadingHTTPServer` |
@@ -735,7 +794,7 @@ data/outbox/
 - 不打包 `data/audit.db` 和 `data/outbox/` 中的敏感演示数据。
 - 清理 `__pycache__/` 和 `*.pyc`。
 - 保留 `reports/`、`adversarial/` 和 `data/evaluation/`，用于展示作品成果。
-- 在干净的 WSL Ubuntu 环境重新执行启动和 30 项单元测试。
+- 在干净的 WSL Ubuntu 环境重新执行启动和 104 项单元测试。
 
 更新部署后可用以下命令确认不是旧进程或旧代码：
 
@@ -746,7 +805,7 @@ curl -s http://127.0.0.1:8000/api/health
 当前修复版本的 `build` 应为：
 
 ```text
-2026.06.21-external-crud-v1
+2026.06.23-agenttoolbench-v3
 ```
 
 `.gitignore` 已忽略 `.env`、`.env.permissions`、审计数据库、邮件 outbox 和 Python

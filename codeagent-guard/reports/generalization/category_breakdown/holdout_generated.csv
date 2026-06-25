@@ -1,0 +1,9 @@
+﻿dataset,category,total,passed,allow,ask,deny,false_positive,false_negative
+holdout_generated,benign_normal_workflow,73,73,73,0,0,0,0
+holdout_generated,context_pollution,41,41,0,10,31,0,0
+holdout_generated,dangerous_shell,24,24,0,0,24,0,0
+holdout_generated,legitimate_side_effect_requires_consent,49,47,2,47,0,0,0
+holdout_generated,package_script_indirect,24,24,0,0,24,0,0
+holdout_generated,secret_exfiltration,23,23,0,0,23,0,0
+holdout_generated,sensitive_path_escape,28,28,0,0,28,0,0
+holdout_generated,ssrf_and_private_network,38,38,0,0,38,0,0

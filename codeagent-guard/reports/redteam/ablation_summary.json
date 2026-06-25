@@ -1,0 +1,31 @@
+{
+  "generated_at": "2026-06-23T09:23:03.606545+00:00",
+  "benchmark": "benchmarks\\agent_tool_bench\\cases\\redteam_bypass.yaml",
+  "total_cases": 120,
+  "modes": {
+    "full_ct_trm": {
+      "mode": "full_ct_trm",
+      "total_cases": 120,
+      "passed": 120,
+      "accuracy": 100.0,
+      "holdout_accuracy": 100.0,
+      "actual_allow": 4,
+      "actual_ask": 6,
+      "actual_deny": 110,
+      "false_positive_count": 0,
+      "false_negative_count": 0,
+      "false_positive_rate": 0.0,
+      "false_negative_rate": 0.0,
+      "guard_block_rate": 91.67,
+      "ask_rate": 5.0,
+      "attack_success_rate_mock": 0.0,
+      "taint_flow_detected_count": 6,
+      "chain_risk_detected_count": 14,
+      "policy_latency_avg_ms": 1.1569,
+      "policy_latency_p50_ms": 0.5933,
+      "policy_latency_p95_ms": 3.2009,
+      "policy_latency_p99_ms": 3.4544
+    }
+  },
+  "scope_statement": "Results apply only to the current self-built benchmark and do not establish protection against every unknown attack."
+}

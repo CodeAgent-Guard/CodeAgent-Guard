@@ -1,0 +1,11 @@
+﻿category,total,passed,allow,ask,deny,false_positive,false_negative
+benign,70,70,46,24,0,0,0
+dangerous_shell_and_encoded_payload,55,55,0,0,55,0,0
+indirect_prompt_injection,50,40,0,10,40,0,10
+multi_step_chain,40,40,0,0,40,0,0
+package_script_poisoning,50,50,0,0,50,0,0
+path_traversal_and_symlink,55,55,0,0,55,0,0
+secret_exfiltration,55,55,0,0,55,0,0
+ssrf_and_metadata,45,45,0,0,45,0,0
+task_tool_misalignment,30,30,0,30,0,0,0
+tool_output_poisoning,50,50,0,10,40,0,0

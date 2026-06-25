@@ -1,0 +1,30 @@
+{
+  "generated_at": "2026-06-23T08:17:19.662669+00:00",
+  "iterations": 1000,
+  "actions": {
+    "allow": 500,
+    "ask": 250,
+    "deny": 250
+  },
+  "avg_ms": 1.3225,
+  "p50_ms": 0.6281,
+  "p95_ms": 3.7282,
+  "p99_ms": 4.1801,
+  "max_ms": 6.5436,
+  "large_readme": {
+    "chars": 56279,
+    "entities": 501,
+    "elapsed_ms": 78.131
+  },
+  "long_pytest_log": {
+    "chars": 109889,
+    "entities": 3,
+    "elapsed_ms": 241.2068
+  },
+  "taint_entity_match": {
+    "registered_sources": 1000,
+    "matches": 1001,
+    "elapsed_ms": 2.5938
+  },
+  "scope_statement": "This local stress result describes the current machine and deterministic workload only."
+}

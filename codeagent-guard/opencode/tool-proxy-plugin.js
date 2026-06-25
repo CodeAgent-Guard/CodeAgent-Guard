@@ -40,6 +40,53 @@ async function postJson(url, body) {
   return payload;
 }
 
+async function getJson(url) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Guard approval lookup failed HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForApproval(baseUrl, approvalId, options) {
+  const pollMs = Math.max(250, Number(options.approvalPollMs || 1000));
+  const timeoutMs = Math.max(1000, Number(options.approvalTimeoutMs || 600000));
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const approval = await getJson(
+      `${baseUrl}/api/approvals/${encodeURIComponent(approvalId)}`,
+    );
+    if (approval.status === "approved") {
+      const resolution = approval.resolution || {};
+      if (resolution.action !== "allow") {
+        const reasons = (resolution.reasons || []).join(", ") || "policy_rejected";
+        throw new Error(
+          `CodeAgent Guard did not authorize the resumed call: ` +
+            `${resolution.action || "deny"} (${reasons})`,
+        );
+      }
+      return resolution;
+    }
+    if (approval.status === "rejected" || approval.status === "expired") {
+      throw new Error(
+        `CodeAgent Guard approval ${approval.status}: approval_id=${approvalId}`,
+      );
+    }
+    await sleep(pollMs);
+  }
+  throw new Error(
+    `CodeAgent Guard approval timed out: approval_id=${approvalId}`,
+  );
+}
+
 export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
   const baseUrl = guardUrl(options);
   const allowedTools = Array.isArray(options.allowedTools)
@@ -56,7 +103,10 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
         trace_id: `opencode-${sessionID}`,
         session_id: sessionID,
         call_id: callID,
-        task: `OpenCode session ${sessionID}`,
+        task:
+          options.task ||
+          process.env.OPENCODE_GUARD_TASK ||
+          `OpenCode session ${sessionID}`,
         source: "agent",
         agent_id: "opencode",
         allowed_tools: allowedTools,
@@ -67,6 +117,11 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
           server_url: String(ctx.serverUrl),
         },
       });
+
+      if (result.action === "ask" && result.approval_id) {
+        await waitForApproval(baseUrl, result.approval_id, options);
+        return;
+      }
 
       if (result.action !== "allow") {
         const approval = result.approval_id

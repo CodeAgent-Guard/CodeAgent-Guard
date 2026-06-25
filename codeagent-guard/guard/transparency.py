@@ -246,9 +246,20 @@ class TransparencyService:
             return [cls.redact(item) for item in value[:100]]
         if isinstance(value, str):
             text = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "sk-[REDACTED]", value)
+            text = re.sub(r"\bAKIA[0-9A-Z]{16}\b", "AKIA[REDACTED]", text)
             text = re.sub(
                 r"(?i)((?:api[_-]?key|token|password|secret)\s*[:=]\s*)\S+",
                 r"\1[REDACTED]",
+                text,
+            )
+            text = re.sub(
+                r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
+                r"\1[REDACTED]",
+                text,
+            )
+            text = re.sub(
+                r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+                "[PRIVATE KEY REDACTED]",
                 text,
             )
             return text[:12000]

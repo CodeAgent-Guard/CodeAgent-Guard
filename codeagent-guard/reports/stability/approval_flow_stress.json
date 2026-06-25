@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-06-23T09:21:38.675433+00:00",
+  "approval_count": 200,
+  "concurrency": 16,
+  "unique_approval_ids": 200,
+  "pending_query_count": 200,
+  "approved_count": 100,
+  "rejected_count": 100,
+  "guard_executor_calls": 0,
+  "create_avg_ms": 220.0749,
+  "create_p95_ms": 424.8367000000144,
+  "query_total_ms": 401.8917,
+  "resolve_avg_ms": 11.5984,
+  "audit_chain_valid": true,
+  "audit_event_count": 400,
+  "scope_statement": "This stress run uses delegated external calls and a local temporary SQLite database; no email is sent."
+}

@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import subprocess
+import threading
 import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,10 +17,18 @@ from guard.adapters import OpenCodeToolProxyAdapter
 from guard.agent import Agent
 from guard.audit import AuditStore
 from guard.catalog import TOOL_SCHEMAS
+from guard.ct_trm_evaluation import CTTRMEvaluationService
 from guard.evaluation import EvaluationService
+from guard.evaluation_ct_trm import (
+    MODES as AGENT_TOOL_BENCH_MODES,
+    load_cases as load_agent_tool_bench_cases,
+    run_mode as run_agent_tool_bench_mode,
+    write_reports as write_agent_tool_bench_reports,
+)
 from guard.executors import ToolExecutorRegistry
 from guard.policy import PolicyEngine
 from guard.providers import LLMProvider
+from guard.state import RuntimeStateStore
 from guard.tools import ToolProxy
 from guard.transparency import TransparencyService
 from guard.trusted_workspaces import TrustedWorkspaceStore
@@ -41,11 +50,12 @@ def _env_paths(name: str) -> tuple[Path, ...]:
 
 OPEN_DIRECTORY_ROOTS = _env_paths("GUARD_OPEN_DIRECTORY_ROOTS")
 EXTERNAL_WRITE_ROOTS = _env_paths("GUARD_EXTERNAL_WRITE_ROOTS")
-BUILD = "2026.06.21-trusted-workspaces-v4"
+BUILD = "2026.06.23-agenttoolbench-v4"
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 DATA.mkdir(parents=True, exist_ok=True)
 
 trusted_workspaces = TrustedWorkspaceStore(DATA / "trusted_workspaces.json")
+runtime_state = RuntimeStateStore(DATA / "state.db")
 audit = AuditStore(DATA / "audit.db")
 transparency = TransparencyService(db_path=DATA / "traces.db")
 policy = PolicyEngine(
@@ -56,6 +66,7 @@ policy = PolicyEngine(
     open_directory_roots=OPEN_DIRECTORY_ROOTS,
     external_write_roots=EXTERNAL_WRITE_ROOTS,
     trusted_workspace_roots=trusted_workspaces.roots(),
+    state_store=runtime_state,
 )
 executor = ToolExecutorRegistry(
     WORKSPACE,
@@ -71,11 +82,39 @@ proxy = ToolProxy(
     DATA / "outbox",
     executor=executor,
     transparency=transparency,
+    state_store=runtime_state,
 )
 provider = LLMProvider()
 agent = Agent(proxy, provider, transparency, DATA / "agent_contexts.json")
 opencode_adapter = OpenCodeToolProxyAdapter(proxy, transparency)
 evaluation = EvaluationService(policy, DATA / "evaluation", audit)
+ct_trm_evaluation = CTTRMEvaluationService(
+    ROOT / "benchmarks" / "agent_tool_bench" / "ct_trm_cases.yaml",
+    ROOT / "reports",
+)
+AGENT_TOOL_BENCH_CASES = (
+    ROOT / "benchmarks" / "agent_tool_bench" / "cases" / "ct_trm_500.yaml"
+)
+AGENT_TOOL_BENCH_REPORTS = ROOT / "reports" / "ct_trm"
+agent_tool_bench_lock = threading.Lock()
+
+
+def _run_agent_tool_bench() -> dict:
+    if not agent_tool_bench_lock.acquire(blocking=False):
+        raise ValueError("AgentToolBench 评测正在运行")
+    try:
+        cases = load_agent_tool_bench_cases(AGENT_TOOL_BENCH_CASES)
+        results = {
+            mode: run_agent_tool_bench_mode(mode, cases)
+            for mode in AGENT_TOOL_BENCH_MODES
+        }
+        return write_agent_tool_bench_reports(
+            AGENT_TOOL_BENCH_CASES,
+            AGENT_TOOL_BENCH_REPORTS,
+            results,
+        )
+    finally:
+        agent_tool_bench_lock.release()
 
 
 def _trusted_workspace_status() -> dict:
@@ -225,8 +264,27 @@ class Handler(BaseHTTPRequestHandler):
                 })
             elif parsed.path == "/api/evaluation":
                 self._json(evaluation.last_result())
+            elif parsed.path == "/api/evaluation/ct-trm":
+                self._json(ct_trm_evaluation.last_result())
+            elif parsed.path == "/api/evaluation/agent-tool-bench":
+                summary_path = ROOT / "reports" / "ct_trm" / "ablation_summary.json"
+                self._json(
+                    json.loads(summary_path.read_text(encoding="utf-8"))
+                    if summary_path.exists()
+                    else {"available": False}
+                )
             elif parsed.path == "/api/approvals":
                 self._json({"approvals": proxy.list_approvals()})
+            elif parsed.path.startswith("/api/approvals/"):
+                approval_id = parsed.path.rsplit("/", 1)[1]
+                approval = proxy.get_approval_status(approval_id)
+                if approval is None:
+                    self._json(
+                        {"error": "approval not found"},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                else:
+                    self._json(approval)
             elif parsed.path == "/api/agent/conversations":
                 query = parse_qs(parsed.query)
                 self._json(agent.list_conversations(
@@ -268,6 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                     agent_id=str(body.get("agent_id", "external-agent")),
                     call_id=body.get("call_id"),
                     allowed_tools=body.get("allowed_tools"),
+                    conversation_id=body.get("conversation_id"),
                 )
                 self._json(result)
             elif parsed.path == "/api/opencode/authorize-tool":
@@ -292,12 +351,18 @@ class Handler(BaseHTTPRequestHandler):
                     tainted=bool(body.get("tainted", False)),
                     call_id=body.get("call_id"),
                     allowed_tools=allowed_tools,
-                    metadata=body.get("metadata") or {},
+                    metadata={
+                        **(body.get("metadata") or {}),
+                        "session_id": body.get("session_id"),
+                    },
                 )
                 self._json(result)
             elif parsed.path == "/api/agent/run":
-                if not isinstance(body.get("allowed_tools"), list):
-                    raise ValueError("当前任务必须显式选择 allowed_tools")
+                if (
+                    body.get("allowed_tools") is not None
+                    and not isinstance(body.get("allowed_tools"), list)
+                ):
+                    raise ValueError("allowed_tools 必须是数组或 null")
                 self._json(agent.run(
                     str(body.get("prompt", "")),
                     int(body.get("max_steps", 8)),
@@ -337,6 +402,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(evaluation.generate())
             elif parsed.path == "/api/evaluation/run":
                 self._json(evaluation.run())
+            elif parsed.path == "/api/evaluation/ct-trm/run":
+                self._json(ct_trm_evaluation.run())
+            elif parsed.path == "/api/evaluation/agent-tool-bench/run":
+                self._json(_run_agent_tool_bench())
             elif parsed.path == "/api/traces/start":
                 trace_id = str(body.get("trace_id") or "")
                 if not trace_id:
@@ -346,6 +415,13 @@ class Handler(BaseHTTPRequestHandler):
                     task=str(body.get("task", "外部 Agent 任务")),
                     agent_id=str(body.get("agent_id", "external-agent")),
                     metadata=body.get("metadata") or {},
+                )
+                policy.register_context(
+                    str(body.get("task", "外部 Agent 任务")),
+                    "user_task",
+                    "external_agent_task",
+                    trace_id=trace_id,
+                    conversation_id=body.get("conversation_id"),
                 )
                 self._json(transparency.snapshot(trace_id))
             elif parsed.path == "/api/traces/event":

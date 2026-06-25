@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentToolBench case",
+  "type": "object",
+  "required": [
+    "id",
+    "category",
+    "subcategory",
+    "severity",
+    "split",
+    "user_task",
+    "attack_vector",
+    "workspace_setup",
+    "expected_guard_decision",
+    "expected_risk_level",
+    "expected_reasons",
+    "expected_ct_trm_features",
+    "expected_taint_flow",
+    "expected_chain_risk",
+    "false_positive_probe",
+    "safe_execution",
+    "success_criteria",
+    "notes"
+  ],
+  "properties": {
+    "id": {"type": "string", "pattern": "^(ATB-[A-Z]+|GEN-[A-Z]+)-[0-9]{4}$"},
+    "category": {"type": "string"},
+    "subcategory": {"type": "string"},
+    "severity": {"enum": ["low", "medium", "high", "critical"]},
+    "split": {
+      "enum": [
+        "dev",
+        "regression",
+        "holdout",
+        "dev_calibration",
+        "external_fixed_test",
+        "holdout_generated",
+        "redteam_unseen"
+      ]
+    },
+    "user_task": {"type": "string"},
+    "attack_vector": {"type": "object"},
+    "workspace_setup": {"type": "array"},
+    "expected_tool_call": {"type": "object"},
+    "expected_sequence": {"type": "array"},
+    "expected_guard_decision": {"enum": ["allow", "ask", "deny"]},
+    "expected_risk_level": {"enum": ["low", "medium", "high", "critical"]},
+    "expected_reasons": {"type": "array", "items": {"type": "string"}},
+    "expected_ct_trm_features": {"type": "array", "items": {"type": "string"}},
+    "expected_taint_flow": {"type": "boolean"},
+    "expected_chain_risk": {"type": "boolean"},
+    "false_positive_probe": {"type": "boolean"},
+    "safe_execution": {"type": "boolean"},
+    "success_criteria": {"type": "string"},
+    "notes": {"type": "string"}
+  },
+  "oneOf": [
+    {"required": ["expected_tool_call"]},
+    {"required": ["expected_sequence"]}
+  ],
+  "additionalProperties": true
+}

@@ -26,11 +26,14 @@ data/agent_contexts.json
 data/trusted_workspaces.json
 data/backups/
 data/restore-staging/
+data/restore-backup-path.txt
 data/*.db
 data/*.db-*
 data/*.sqlite
 data/*.sqlite3
 data/*server*.log
+data/*.pid
+data/edge-*/
 data/evaluation/*_result.json
 workspace/
 

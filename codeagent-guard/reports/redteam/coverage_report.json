@@ -1,0 +1,51 @@
+{
+  "categories": {
+    "redteam_bypass": 120
+  },
+  "risk_patterns": {
+    "P1": 3,
+    "P2": 24,
+    "P3": 0,
+    "P4": 0,
+    "P5": 12,
+    "P6": 0,
+    "P7": 30,
+    "P8": 21,
+    "P9": 6,
+    "P10": 8,
+    "P11": 0,
+    "P12": 0,
+    "P13": 10,
+    "P14": 6,
+    "P15": 0
+  },
+  "chain_patterns": {
+    "C1": 0,
+    "C2": 0,
+    "C3": 0,
+    "C4": 0,
+    "C5": 8,
+    "C6": 0
+  },
+  "tools": {
+    "http_request": 30,
+    "read_file": 30,
+    "run_command": 40,
+    "send_email": 20
+  },
+  "source_types": {},
+  "decisions": {
+    "allow": 4,
+    "ask": 6,
+    "deny": 110
+  },
+  "severities": {
+    "critical": 110,
+    "high": 6,
+    "low": 4
+  },
+  "splits": {
+    "holdout": 30,
+    "regression": 90
+  }
+}
