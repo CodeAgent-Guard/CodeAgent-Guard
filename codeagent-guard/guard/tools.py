@@ -98,6 +98,40 @@ class ToolProxy:
             conversation_id=call.conversation_id,
         )
         policy_latency_ms = (time.perf_counter() - started) * 1000
+        if decision.dlp_scan:
+            dlp_status = (
+                decision.dlp_scan.get("action")
+                if decision.dlp_scan.get("finding_count")
+                else "clean"
+            )
+            dlp_direction = decision.dlp_scan.get("direction", "input")
+            dlp_title = (
+                "DLP 出站扫描：BLOCKED"
+                if dlp_direction == "outbound" and decision.dlp_scan.get("hard_deny")
+                else f"DLP 输入扫描：{str(dlp_status).upper()}"
+            )
+            self.transparency.emit(
+                call.trace_id,
+                phase="dlp_scan",
+                actor="dlp",
+                label="DLP 数据防护",
+                status=dlp_status,
+                title=dlp_title,
+                summary=(
+                    "DLP 未发现敏感数据。"
+                    if not decision.dlp_scan.get("finding_count")
+                    else (
+                        "DLP 检测到外发敏感数据，已生成脱敏摘要和 HMAC 指纹。"
+                        if dlp_direction == "outbound"
+                        else "DLP 已生成脱敏敏感数据证据。"
+                    )
+                ),
+                details={
+                    "call_id": call.call_id,
+                    "tool": call.tool,
+                    **decision.dlp_scan,
+                },
+            )
         if decision.assessment:
             self.transparency.emit(
                 call.trace_id,
@@ -170,9 +204,43 @@ class ToolProxy:
             )
             if execute:
                 try:
-                    result = self.executor.execute(
+                    raw_result = self.executor.execute(
                         call.tool, decision.normalized_args
                     )
+                    observer = getattr(self.policy, "observe_tool_result", None)
+                    if observer is not None:
+                        observer(
+                            call.tool,
+                            decision.normalized_args,
+                            raw_result,
+                            action,
+                            trace_id=call.trace_id,
+                            call_id=call.call_id,
+                            conversation_id=call.conversation_id,
+                            taint_matches=decision.taint_matches,
+                        )
+                    result = raw_result
+                    output_scan = {}
+                    result_scanner = getattr(self.policy, "scan_tool_result", None)
+                    if result_scanner is not None:
+                        result, output_scan = result_scanner(call.tool, raw_result)
+                    if output_scan and output_scan.get("finding_count"):
+                        self.transparency.emit(
+                            call.trace_id,
+                            phase="dlp_scan",
+                            actor="dlp",
+                            label="DLP 输出脱敏",
+                            status="redacted",
+                            title="DLP 输出扫描：REDACTED",
+                            summary=(
+                                "工具结果包含敏感数据，已在返回与审计前脱敏。"
+                            ),
+                            details={
+                                "call_id": call.call_id,
+                                "tool": call.tool,
+                                **output_scan,
+                            },
+                        )
                     summary = self._summarize(result)
                 except Exception as exc:
                     action = "deny"
@@ -182,6 +250,18 @@ class ToolProxy:
                         decision.reasons.append("tool_execution_failed")
                     result = {"error": str(exc)}
                     summary = f"Execution failed: {exc}"
+                    observer = getattr(self.policy, "observe_tool_result", None)
+                    if observer is not None:
+                        observer(
+                            call.tool,
+                            decision.normalized_args,
+                            result,
+                            action,
+                            trace_id=call.trace_id,
+                            call_id=call.call_id,
+                            conversation_id=call.conversation_id,
+                            taint_matches=decision.taint_matches,
+                        )
                 self.transparency.emit(
                     call.trace_id,
                     phase="tool_result",
@@ -196,18 +276,6 @@ class ToolProxy:
                         "result": result,
                     },
                 )
-                observer = getattr(self.policy, "observe_tool_result", None)
-                if observer is not None:
-                    observer(
-                        call.tool,
-                        decision.normalized_args,
-                        result,
-                        action,
-                        trace_id=call.trace_id,
-                        call_id=call.call_id,
-                        conversation_id=call.conversation_id,
-                        taint_matches=decision.taint_matches,
-                    )
             else:
                 result = {
                     "approved": True,
@@ -439,7 +507,7 @@ class ToolProxy:
             actor=actor,
             label="用户审批",
             status="approved" if approve else "rejected",
-            title="用户批准高风险操作" if approve else "用户拒绝高风险操作",
+            title="用户批准本次 Ask 操作" if approve else "用户拒绝本次 Ask 操作",
             summary=(
                 f"用户批准继续执行 {call.tool}。"
                 if approve else f"用户拒绝执行 {call.tool}，工具不会产生副作用。"

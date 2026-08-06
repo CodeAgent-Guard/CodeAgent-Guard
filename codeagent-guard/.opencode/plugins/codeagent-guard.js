@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 const DEFAULT_GUARD_URL = "http://127.0.0.1:8000";
 
 const DEFAULT_ALLOWED_TOOLS = [
@@ -12,61 +14,358 @@ const DEFAULT_ALLOWED_TOOLS = [
   "move_path",
 ];
 
+const sessionPrompts = new Map();
+const sessionScenarios = new Map();
+const sessionTraceIds = new Map();
+const sessionMessageIds = new Map();
+const toolCallArgs = new Map();
+
 function cleanId(value, fallback) {
   return String(value || fallback)
     .replace(/[^A-Za-z0-9_.:-]+/g, "-")
     .slice(0, 120);
 }
 
-function guardUrl(options) {
-  return String(
+function compactText(value, limit = 2000) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function stablePromptId(value) {
+  let hash = 2166136261;
+  for (const character of String(value || "")) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `prompt-${(hash >>> 0).toString(36)}`;
+}
+
+function textFromParts(parts) {
+  return (Array.isArray(parts) ? parts : [])
+    .filter((part) => part && part.type === "text" && part.text)
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
+function promptTextFromValue(value) {
+  if (!value) return "";
+  if (typeof value === "string") return compactText(value);
+  const direct = [
+    value.text,
+    value.content,
+    value.prompt,
+    value.input,
+    value.message?.text,
+    value.message?.content,
+    value.message?.prompt,
+  ].find((item) => typeof item === "string" && item.trim());
+  if (direct) return compactText(direct);
+
+  const parts = Array.isArray(value.parts)
+    ? value.parts
+    : Array.isArray(value.message?.parts)
+      ? value.message.parts
+      : [];
+  const partText = textFromParts(parts);
+  if (partText) return compactText(partText);
+
+  const summary = value.message?.summary || value.summary || {};
+  return compactText([summary.title, summary.body].filter(Boolean).join(" "));
+}
+
+function promptTextFromMessage(...values) {
+  for (const value of values) {
+    const prompt = promptTextFromValue(value);
+    if (prompt) return prompt;
+  }
+  return "";
+}
+
+function videoScenarioFromPrompt(prompt) {
+  const text = String(prompt || "");
+  if (!text) return "";
+  if (/config\.ya?ml|review_required|approval_mode/i.test(text)) {
+    return "ask_config";
+  }
+  if (/bug-report|构建失败诊断|调试接口|debug endpoint|\.env\.demo|debug\.example\.com/i.test(text)) {
+    return "dlp_report";
+  }
+  if (/formatDate|失败用例|本地开发说明|Local troubleshooting|~\/\.ssh\/id_rsa|SSH 私钥|id_rsa/i.test(text)) {
+    return "readme_injection";
+  }
+  if (/package\.json|README\.md|安装命令|启动命令|测试命令|不要修改任何文件/i.test(text)) {
+    return "read_baseline";
+  }
+  return "";
+}
+
+function taskForSession(options, sessionID) {
+  return (
+    options.task ||
+    process.env.OPENCODE_GUARD_TASK ||
+    sessionPrompts.get(sessionID) ||
+    `OpenCode session ${sessionID}`
+  );
+}
+
+function traceIdForSession(sessionID) {
+  return `opencode-${sessionTraceIds.get(sessionID) || sessionID}`;
+}
+
+function compactResult(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") return compactText(value, 12000);
+  if (typeof value !== "object") return value;
+  if (depth >= 4) {
+    try {
+      return compactText(JSON.stringify(value), 4000);
+    } catch {
+      return compactText(String(value), 4000);
+    }
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 50).map((item) => compactResult(item, depth + 1));
+  }
+  const result = {};
+  for (const [key, item] of Object.entries(value).slice(0, 60)) {
+    if (["blob", "buffer", "bytes", "raw"].includes(String(key).toLowerCase())) {
+      continue;
+    }
+    result[key] = compactResult(item, depth + 1);
+  }
+  return result;
+}
+
+function resultPayload(output) {
+  const candidate =
+    output?.result ??
+    output?.output ??
+    output?.content ??
+    output?.text ??
+    output;
+  return compactResult(candidate);
+}
+
+function promptTextFromMessageLegacy(output) {
+  const parts = Array.isArray(output?.parts) ? output.parts : [];
+  const partText = parts
+    .filter((part) => part && part.type === "text" && part.text)
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+  if (partText) return compactText(partText);
+  const summary = output?.message?.summary || {};
+  return compactText([summary.title, summary.body].filter(Boolean).join(" "));
+}
+
+function normalizeUrl(value) {
+  return String(value || "").replace(/\/+$/, "");
+}
+
+function routeGatewayAddress(hex) {
+  const clean = String(hex || "").trim();
+  if (!/^[0-9A-Fa-f]{8}$/.test(clean)) return "";
+  const parts = clean.match(/../g).map((part) => parseInt(part, 16));
+  return parts.reverse().join(".");
+}
+
+function wslHostGuardUrl() {
+  try {
+    const route = readFileSync("/proc/net/route", "utf-8");
+    for (const line of route.split(/\r?\n/).slice(1)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns[1] === "00000000" && columns[2]) {
+        const gateway = routeGatewayAddress(columns[2]);
+        if (gateway && gateway !== "0.0.0.0") {
+          return `http://${gateway}:8000`;
+        }
+      }
+    }
+  } catch {
+    // Non-WSL hosts do not expose /proc/net/route.
+  }
+  try {
+    const resolv = readFileSync("/etc/resolv.conf", "utf-8");
+    const match = resolv.match(/^nameserver\s+([0-9.]+)/m);
+    return match ? `http://${match[1]}:8000` : "";
+  } catch {
+    return "";
+  }
+}
+
+function guardUrls(options) {
+  const configured =
     options.guardUrl ||
-      process.env.OPENCODE_TOOL_PROXY_URL ||
-      process.env.GUARD_TOOL_PROXY_URL ||
-      DEFAULT_GUARD_URL,
-  ).replace(/\/+$/, "");
+    process.env.OPENCODE_TOOL_PROXY_URL ||
+    process.env.GUARD_TOOL_PROXY_URL;
+  if (configured) return [normalizeUrl(configured)];
+  return [...new Set([
+    DEFAULT_GUARD_URL,
+    "http://localhost:8000",
+    wslHostGuardUrl(),
+  ].filter(Boolean).map(normalizeUrl))];
 }
 
 async function postJson(url, body) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    const requestError = new Error(
+      `CodeAgent Guard is unreachable at ${url}: ${error.message}`,
+    );
+    requestError.retryable = true;
+    throw requestError;
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || `Guard tool proxy rejected HTTP ${response.status}`);
+    const requestError = new Error(
+      payload.error || `Guard tool proxy rejected HTTP ${response.status}`,
+    );
+    requestError.retryable = false;
+    requestError.status = response.status;
+    throw requestError;
   }
   return payload;
 }
 
+async function postJsonAny(baseUrls, path, body) {
+  let lastError;
+  for (const baseUrl of baseUrls) {
+    try {
+      return {
+        baseUrl,
+        payload: await postJson(`${baseUrl}${path}`, body),
+      };
+    } catch (error) {
+      if (error.retryable === false) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("CodeAgent Guard is unreachable");
+}
+
+async function getJson(url) {
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { Accept: "application/json" },
+    });
+  } catch (error) {
+    throw new Error(
+      `CodeAgent Guard approval endpoint is unreachable at ${url}: ${error.message}`,
+    );
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `Guard approval lookup failed HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForApproval(baseUrl, approvalId, options) {
+  const pollMs = Math.max(250, Number(options.approvalPollMs || 1000));
+  const timeoutMs = Math.max(1000, Number(options.approvalTimeoutMs || 600000));
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const approval = await getJson(
+      `${baseUrl}/api/approvals/${encodeURIComponent(approvalId)}`,
+    );
+    if (approval.status === "approved") {
+      const resolution = approval.resolution || {};
+      if (resolution.action !== "allow") {
+        const reasons = (resolution.reasons || []).join(", ") || "policy_rejected";
+        throw new Error(
+          `CodeAgent Guard did not authorize the resumed call: ` +
+            `${resolution.action || "deny"} (${reasons})`,
+        );
+      }
+      return resolution;
+    }
+    if (approval.status === "rejected" || approval.status === "expired") {
+      throw new Error(
+        `CodeAgent Guard approval ${approval.status}: approval_id=${approvalId}`,
+      );
+    }
+    await sleep(pollMs);
+  }
+  throw new Error(
+    `CodeAgent Guard approval timed out: approval_id=${approvalId}`,
+  );
+}
+
 export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
-  const baseUrl = guardUrl(options);
+  const baseUrls = guardUrls(options);
   const allowedTools = Array.isArray(options.allowedTools)
     ? options.allowedTools
     : DEFAULT_ALLOWED_TOOLS;
 
   return {
+    async "chat.message"(input, output) {
+      const prompt = promptTextFromMessage(input, output) || promptTextFromMessageLegacy(output);
+      const sessionID = cleanId(input?.sessionID || output?.sessionID, "session");
+      if (prompt) {
+        const messageID = cleanId(
+          input?.messageID || output?.message?.id || stablePromptId(prompt),
+          "message",
+        );
+        if (sessionMessageIds.get(sessionID) === messageID) return;
+        sessionMessageIds.set(sessionID, messageID);
+        sessionPrompts.set(sessionID, prompt);
+        const scenario = videoScenarioFromPrompt(prompt);
+        if (scenario) sessionScenarios.set(sessionID, scenario);
+        const suffix = `${sessionID}-${scenario || "task"}-${messageID}`;
+        sessionTraceIds.set(sessionID, cleanId(suffix, sessionID));
+      }
+    },
+
     async "tool.execute.before"(input, output) {
       const sessionID = cleanId(input.sessionID, "session");
       const callID = cleanId(input.callID, "call");
-      const result = await postJson(`${baseUrl}/api/opencode/authorize-tool`, {
-        tool: input.tool,
-        args: output.args || {},
-        trace_id: `opencode-${sessionID}`,
-        session_id: sessionID,
-        call_id: callID,
-        task: `OpenCode session ${sessionID}`,
-        source: "agent",
-        agent_id: "opencode",
-        allowed_tools: allowedTools,
-        metadata: {
-          project: ctx.project,
-          directory: ctx.directory,
-          worktree: ctx.worktree,
-          server_url: String(ctx.serverUrl),
+      const toolArgs = output.args || input?.args || {};
+      const task = taskForSession(options, sessionID);
+      const videoScenario =
+        sessionScenarios.get(sessionID) ||
+        videoScenarioFromPrompt(task) ||
+        videoScenarioFromPrompt(JSON.stringify(toolArgs));
+      toolCallArgs.set(`${sessionID}:${callID}`, toolArgs);
+      const { baseUrl, payload: result } = await postJsonAny(
+        baseUrls,
+        "/api/opencode/authorize-tool",
+        {
+          tool: input.tool,
+          args: toolArgs,
+          trace_id: traceIdForSession(sessionID),
+          session_id: sessionID,
+          call_id: callID,
+          task,
+          source: "agent",
+          agent_id: "opencode",
+          allowed_tools: allowedTools,
+          metadata: {
+            project: ctx.project,
+            directory: ctx.directory,
+            worktree: ctx.worktree,
+            server_url: String(ctx.serverUrl),
+            video_scenario: videoScenario,
+          },
         },
-      });
+      );
+
+      if (result.action === "ask" && result.approval_id) {
+        await waitForApproval(baseUrl, result.approval_id, options);
+        return;
+      }
 
       if (result.action !== "allow") {
         const approval = result.approval_id
@@ -75,8 +374,48 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
         const reasons = (result.reasons || []).join(", ") || "policy_rejected";
         throw new Error(
           `CodeAgent Guard blocked ${input.tool}: ${result.action} ` +
-            `(${reasons}).${approval}`,
+          `(${reasons}).${approval}`,
         );
+      }
+    },
+
+    async "tool.execute.after"(input, output) {
+      const sessionID = cleanId(input?.sessionID || output?.sessionID, "session");
+      const callID = cleanId(input?.callID || output?.callID, "call");
+      const callKey = `${sessionID}:${callID}`;
+      const toolArgs = output?.args || input?.args || toolCallArgs.get(callKey) || {};
+      const task = taskForSession(options, sessionID);
+      const videoScenario =
+        sessionScenarios.get(sessionID) ||
+        videoScenarioFromPrompt(task) ||
+        videoScenarioFromPrompt(JSON.stringify(toolArgs));
+      try {
+        await postJsonAny(
+          baseUrls,
+          "/api/opencode/tool-result",
+          {
+            tool: input.tool,
+            args: toolArgs,
+            result: resultPayload(output),
+            trace_id: traceIdForSession(sessionID),
+            session_id: sessionID,
+            call_id: callID,
+            task,
+            source: "agent",
+            agent_id: "opencode",
+            metadata: {
+              project: ctx.project,
+              directory: ctx.directory,
+              worktree: ctx.worktree,
+              server_url: String(ctx.serverUrl),
+              video_scenario: videoScenario,
+            },
+          },
+        );
+      } catch (error) {
+        console.warn(`[CodeAgent Guard] failed to record tool result: ${error.message}`);
+      } finally {
+        toolCallArgs.delete(callKey);
       }
     },
   };

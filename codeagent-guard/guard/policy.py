@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl, unquote, urlparse
 
 from .catalog import TOOL_NAMES
 from .chain_risk import ChainRiskAnalyzer
+from .dlp import DLPReport, DLPScanner
 from .network_safety import NetworkTargetError, validate_public_http_target
 from .provenance import ProvenanceGraph
 from .risk_model import CTTRMRiskModel
@@ -28,6 +29,8 @@ class Decision:
     reasons: list[str] = field(default_factory=list)
     normalized_args: dict = field(default_factory=dict)
     assessment: dict = field(default_factory=dict)
+    dlp_scan: dict = field(default_factory=dict)
+    dlp_findings: list[dict] = field(default_factory=list)
     taint_matches: list = field(default_factory=list, repr=False)
 
     def add(self, action: str, risk: str, reason: str) -> None:
@@ -112,6 +115,7 @@ class PolicyEngine:
             state_store=state_store,
         )
         self.chain_risk = ChainRiskAnalyzer(state_store=state_store)
+        self.dlp = DLPScanner()
         self.risk_model = CTTRMRiskModel(
             self.workspace,
             self.taint_tracker,
@@ -199,6 +203,12 @@ class PolicyEngine:
 
         evaluator = getattr(self, f"_evaluate_{tool}")
         evaluator(decision, args)
+        dlp_report = self.dlp.scan_tool_call(
+            tool,
+            args,
+            internal_domains=self.internal_domains,
+        )
+        self._apply_dlp_report(decision, dlp_report)
 
         low_trust_source = source in {
             "runtime_log",
@@ -260,6 +270,7 @@ class PolicyEngine:
                     "tainted": tainted,
                     "conversation_id": conversation_id,
                     "ct_trm_mode": ct_trm_mode,
+                    "dlp_findings": decision.dlp_findings,
                 },
                 str(trace_id),
                 (
@@ -297,6 +308,18 @@ class PolicyEngine:
             decision.action = "allow"
             decision.reasons = [r for r in decision.reasons if r != "user_confirmation_required"]
         return decision
+
+    @staticmethod
+    def _apply_dlp_report(decision: Decision, report: DLPReport) -> None:
+        decision.dlp_scan = report.to_dict()
+        decision.dlp_findings = decision.dlp_scan.get("findings", [])
+        for finding in report.findings:
+            for reason in finding.reasons:
+                decision.add(finding.action, finding.risk_level, reason)
+
+    def scan_tool_result(self, tool: str, result: dict) -> tuple[dict, dict]:
+        sanitized, report = self.dlp.scan_tool_result(tool, result or {})
+        return sanitized, report.to_dict()
 
     def register_context(
         self,
@@ -565,6 +588,13 @@ class PolicyEngine:
             if decision.action != "deny":
                 decision.add("ask", "high", "external_file_write")
                 decision.add("ask", "high", "user_confirmation_required")
+        if (
+            scope in {"workspace", "trusted_workspace"}
+            and normalized.suffix.lower() in {".yml", ".yaml", ".toml", ".ini", ".cfg"}
+            and decision.action != "deny"
+        ):
+            decision.add("ask", "medium", "configuration_file_write")
+            decision.add("ask", "medium", "user_confirmation_required")
         if (
             normalized.suffix.lower()
             in {".exe", ".dll", ".so", ".bat", ".cmd", ".ps1"}

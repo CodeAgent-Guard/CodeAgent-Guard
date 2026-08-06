@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
+import threading
 import uuid
+from typing import Any
 
 from .contracts import ToolCall, ToolGatewayPort
 from .transparency import TransparencyService
@@ -138,6 +141,11 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         agent_id: str = "opencode",
     ) -> None:
         super().__init__(gateway, transparency, agent_id)
+        workspace = getattr(gateway, "workspace", None)
+        self.workspace = Path(workspace).resolve() if workspace else None
+        self._request_lock = threading.RLock()
+        self._authorization_cache: dict[tuple[str, str], dict] = {}
+        self._completed_calls: set[tuple[str, str]] = set()
 
     def authorize_tool(
         self,
@@ -152,13 +160,49 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         allowed_tools: list[str] | tuple[str, ...] | None = None,
         metadata: dict | None = None,
     ) -> dict:
-        mapped_tool, mapped_args = self._map_tool(tool, args)
+        metadata = metadata or {}
+        actual_call_id = call_id or f"call-{uuid.uuid4().hex[:12]}"
+        cache_key = (trace_id, actual_call_id)
+        with self._request_lock:
+            cached = self._authorization_cache.get(cache_key)
+            if cached is not None:
+                return copy.deepcopy(cached)
+            result = self._authorize_uncached(
+                trace_id=trace_id,
+                task=task,
+                tool=tool,
+                args=args,
+                source=source,
+                tainted=tainted,
+                call_id=actual_call_id,
+                allowed_tools=allowed_tools,
+                metadata=metadata,
+            )
+            if len(self._authorization_cache) >= 1000:
+                self._authorization_cache.pop(next(iter(self._authorization_cache)))
+            self._authorization_cache[cache_key] = copy.deepcopy(result)
+            return result
+
+    def _authorize_uncached(
+        self,
+        *,
+        trace_id: str,
+        task: str,
+        tool: str,
+        args: dict,
+        source: str,
+        tainted: bool,
+        call_id: str,
+        allowed_tools: list[str] | tuple[str, ...] | None,
+        metadata: dict,
+    ) -> dict:
+        mapped_tool, mapped_args = self._map_tool(tool, args, metadata)
         policy_args = {
             **mapped_args,
             "_opencode": {
                 "tool": tool,
                 "args": args,
-                **(metadata or {}),
+                **metadata,
             },
         }
         result = self.gateway.authorize(ToolCall(
@@ -176,9 +220,9 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 else self.DEFAULT_ALLOWED_POLICY_TOOLS
             ),
             conversation_id=str(
-                (metadata or {}).get("session_id") or trace_id
+                metadata.get("session_id") or trace_id
             ),
-            call_id=call_id or f"call-{uuid.uuid4().hex[:12]}",
+            call_id=call_id,
         ))
         result["opencode"] = {
             "tool": tool,
@@ -187,7 +231,114 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         }
         return result
 
-    def _map_tool(self, tool: str, args: dict) -> tuple[str, dict]:
+    def record_tool_result(
+        self,
+        *,
+        trace_id: str,
+        task: str,
+        tool: str,
+        args: dict,
+        result: Any,
+        call_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        metadata = metadata or {}
+        actual_call_id = call_id or f"call-{uuid.uuid4().hex[:12]}"
+        cache_key = (trace_id, actual_call_id)
+        with self._request_lock:
+            if cache_key in self._completed_calls:
+                return self.transparency.snapshot(trace_id)
+            snapshot = self._record_tool_result_uncached(
+                trace_id=trace_id,
+                task=task,
+                tool=tool,
+                args=args,
+                result=result,
+                call_id=actual_call_id,
+                metadata=metadata,
+            )
+            if len(self._completed_calls) >= 1000:
+                self._completed_calls.clear()
+            self._completed_calls.add(cache_key)
+            return snapshot
+
+    def _record_tool_result_uncached(
+        self,
+        *,
+        trace_id: str,
+        task: str,
+        tool: str,
+        args: dict,
+        result: Any,
+        call_id: str,
+        metadata: dict,
+    ) -> dict:
+        mapped_tool, mapped_args = self._map_tool(tool, args, metadata)
+        result_payload = self._normalize_external_result(
+            mapped_tool,
+            mapped_args,
+            result,
+        )
+        sanitized_result = result_payload
+        output_scan: dict = {}
+        policy = getattr(self.gateway, "policy", None)
+        result_scanner = getattr(policy, "scan_tool_result", None)
+        if result_scanner is not None:
+            sanitized_result, output_scan = result_scanner(
+                mapped_tool,
+                result_payload,
+            )
+        if output_scan and output_scan.get("finding_count"):
+            self.transparency.emit(
+                trace_id,
+                phase="dlp_scan",
+                actor="dlp",
+                label="DLP 输出脱敏",
+                status="redacted",
+                title="DLP 输出扫描：REDACTED",
+                summary="OpenCode 工具结果包含敏感数据，已生成脱敏摘要和 HMAC 指纹。",
+                details={
+                    "call_id": call_id,
+                    "tool": mapped_tool,
+                    **output_scan,
+                },
+            )
+        observer = getattr(policy, "observe_tool_result", None)
+        if observer is not None:
+            observer(
+                mapped_tool,
+                mapped_args,
+                sanitized_result,
+                "allow",
+                trace_id=trace_id,
+                call_id=call_id,
+                conversation_id=str(metadata.get("session_id") or trace_id),
+            )
+        self.transparency.emit(
+            trace_id,
+            phase="tool_result",
+            actor=self.agent_id,
+            label="OpenCode 工具执行结果",
+            status="success",
+            title=f"{mapped_tool} 返回结果",
+            summary=TransparencyService.result_summary(sanitized_result),
+            details={
+                "call_id": call_id,
+                "tool": mapped_tool,
+                "external_tool": tool,
+                "result": sanitized_result,
+                "execution_delegated": True,
+            },
+        )
+        return self.transparency.snapshot(trace_id)
+
+    def _map_tool(
+        self,
+        tool: str,
+        args: dict,
+        metadata: dict | None = None,
+    ) -> tuple[str, dict]:
+        metadata = metadata or {}
         normalized = tool.strip().lower()
         if normalized == "bash":
             return "run_command", {
@@ -195,15 +346,15 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 "timeout": args.get("timeout", 10),
             }
         if normalized == "read":
-            return "read_file", {"path": self._path(args)}
+            return "read_file", {"path": self._path(args, metadata)}
         if normalized == "write":
             return "write_file", {
-                "path": self._path(args),
+                "path": self._path(args, metadata),
                 "content": str(args.get("content", "")),
             }
         if normalized == "edit":
             return "write_file", {
-                "path": self._path(args),
+                "path": self._path(args, metadata),
                 "content": str(self._first(
                     args,
                     "newString",
@@ -214,7 +365,10 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             }
         if normalized == "grep":
             return "search_files", {
-                "path": self._first(args, "path", "directory", default="."),
+                "path": self._map_path(
+                    self._first(args, "path", "directory", default="."),
+                    metadata,
+                ),
                 "query": self._first(args, "pattern", "query"),
                 "glob": self._first(args, "include", "glob", default="*"),
                 "regex": True,
@@ -222,7 +376,10 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             }
         if normalized == "glob":
             return "list_directory", {
-                "path": self._glob_root(str(args.get("pattern", "")), args),
+                "path": self._map_path(
+                    self._glob_root(str(args.get("pattern", "")), args),
+                    metadata,
+                ),
                 "max_depth": args.get("max_depth", 5),
                 "include_hidden": bool(args.get("include_hidden", False)),
             }
@@ -241,6 +398,88 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             }
         return normalized, args
 
+    @classmethod
+    def _normalize_external_result(
+        cls,
+        tool: str,
+        mapped_args: dict,
+        result: Any,
+    ) -> dict:
+        if isinstance(result, dict):
+            payload = result
+        else:
+            payload = {"output": result}
+        if tool == "read_file":
+            content = cls._first_result_text(
+                payload,
+                "content",
+                "text",
+                "output",
+                "stdout",
+                "result",
+            )
+            return {
+                "path": mapped_args.get("path", ""),
+                "content": cls._compact_result_text(content),
+            }
+        if tool == "run_command":
+            return {
+                "stdout": cls._compact_result_text(
+                    cls._first_result_text(payload, "stdout", "output", "text")
+                ),
+                "stderr": cls._compact_result_text(
+                    cls._first_result_text(payload, "stderr", "error")
+                ),
+                "exit_code": payload.get("exit_code", payload.get("code", 0)),
+            }
+        if tool == "http_request":
+            return {
+                "url": mapped_args.get("url", ""),
+                "status": payload.get("status", payload.get("status_code", 200)),
+                "headers": payload.get("headers", {}),
+                "body": cls._compact_result_text(
+                    cls._first_result_text(payload, "body", "text", "output", "result")
+                ),
+            }
+        if tool == "write_file":
+            return {
+                "path": mapped_args.get("path", ""),
+                "written": True,
+                "content": cls._compact_result_text(str(mapped_args.get("content", ""))),
+            }
+        return cls._compact_result(payload)
+
+    @classmethod
+    def _compact_result(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return cls._compact_result_text(value)
+        if isinstance(value, dict):
+            return {
+                str(key): cls._compact_result(item)
+                for key, item in value.items()
+                if str(key) not in {"blob", "buffer", "bytes"}
+            }
+        if isinstance(value, list):
+            return [cls._compact_result(item) for item in value[:100]]
+        return value
+
+    @staticmethod
+    def _compact_result_text(value: Any, limit: int = 12000) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else f"{text[:limit]}..."
+
+    @staticmethod
+    def _first_result_text(payload: dict, *keys: str) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return (
+                    value
+                    if isinstance(value, str)
+                    else str(value)
+                )
+        return ""
+
     @staticmethod
     def _first(args: dict, *names: str, default: object = "") -> object:
         for name in names:
@@ -249,16 +488,121 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 return value
         return default
 
-    @classmethod
-    def _path(cls, args: dict) -> str:
-        return str(cls._first(
+    def _path(self, args: dict, metadata: dict | None = None) -> str:
+        return self._map_path(self._first(
             args,
             "path",
             "filePath",
             "file_path",
             "filepath",
             "file",
-        ))
+        ), metadata)
+
+    def _map_path(self, value: object, metadata: dict | None = None) -> str:
+        raw = str(value or "")
+        if not raw:
+            return raw
+        normalized = raw.replace("\\", "/")
+        if normalized.startswith("~"):
+            return raw
+
+        direct = self._workspace_relative(raw)
+        if direct is not None:
+            return direct
+
+        suffix = self._demo_repo_suffix(normalized)
+        if suffix and self._workspace_path_exists(suffix):
+            return suffix
+
+        metadata = metadata or {}
+        for key in ("directory", "worktree", "project"):
+            base = str(metadata.get(key) or "")
+            if not base:
+                continue
+            base_normalized = base.replace("\\", "/").rstrip("/")
+            relative = self._string_relative(normalized, base_normalized)
+            if relative is None:
+                continue
+            if relative and self._workspace_path_exists(relative):
+                return relative
+            base_suffix = self._demo_repo_suffix(base_normalized)
+            if base_suffix and relative:
+                candidate = f"{base_suffix.rstrip('/')}/{relative}"
+                if self._workspace_path_exists(candidate):
+                    return candidate
+
+        relative_base = self._metadata_demo_base(metadata)
+        if relative_base and not self._looks_absolute(normalized):
+            candidate = f"{relative_base.rstrip('/')}/{normalized.lstrip('./')}"
+            if self._workspace_path_exists(candidate):
+                return candidate
+
+        return raw
+
+    def _workspace_relative(self, value: str) -> str | None:
+        if self.workspace is None:
+            return None
+        try:
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                return None
+            relative = path.resolve(strict=False).relative_to(self.workspace)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return self._clean_relative(str(relative))
+
+    def _workspace_path_exists(self, relative: str) -> bool:
+        if self.workspace is None:
+            return False
+        clean = self._clean_relative(relative)
+        if not clean or clean == "." or clean.startswith("../"):
+            return False
+        return (self.workspace / clean).exists()
+
+    @staticmethod
+    def _string_relative(path: str, base: str) -> str | None:
+        clean_path = path.rstrip("/")
+        clean_base = base.rstrip("/")
+        if not clean_path or not clean_base:
+            return None
+        if clean_path.lower() == clean_base.lower():
+            return ""
+        prefix = f"{clean_base}/"
+        if clean_path.lower().startswith(prefix.lower()):
+            return clean_path[len(prefix):]
+        return None
+
+    @classmethod
+    def _demo_repo_suffix(cls, value: str) -> str | None:
+        normalized = value.replace("\\", "/").strip("/")
+        lower = normalized.lower()
+        marker = "demo-repo/"
+        index = lower.find(marker)
+        if index >= 0:
+            return cls._clean_relative(normalized[index:])
+        if lower.endswith("demo-repo"):
+            return "demo-repo"
+        return None
+
+    @classmethod
+    def _metadata_demo_base(cls, metadata: dict) -> str | None:
+        for key in ("directory", "worktree", "project"):
+            suffix = cls._demo_repo_suffix(str(metadata.get(key) or ""))
+            if suffix:
+                return suffix
+        return None
+
+    @staticmethod
+    def _looks_absolute(value: str) -> bool:
+        return (
+            value.startswith("/")
+            or value.startswith("\\")
+            or (len(value) >= 3 and value[1:3] in (":/", ":\\"))
+        )
+
+    @staticmethod
+    def _clean_relative(value: str) -> str:
+        return str(value).replace("\\", "/").lstrip("/")
 
     @staticmethod
     def _glob_root(pattern: str, args: dict) -> str:

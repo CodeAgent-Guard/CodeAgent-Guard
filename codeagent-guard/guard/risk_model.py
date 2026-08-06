@@ -31,6 +31,7 @@ class RiskAssessment:
     risk_level: str
     features: list[RiskFeature] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
+    dlp_findings: list[dict] = field(default_factory=list)
     taint_matches: list = field(default_factory=list)
     chain_findings: list = field(default_factory=list)
     task_budget: Optional[TaskCapabilityBudget] = None
@@ -51,6 +52,7 @@ class RiskAssessment:
             "risk_level": self.risk_level,
             "features": [asdict(feature) for feature in self.features],
             "reasons": self.reasons,
+            "dlp_findings": self.dlp_findings,
             "taint_matches": list(self.taint_matches),
             "chain_findings": [
                 asdict(value) if not isinstance(value, dict) else value
@@ -148,6 +150,7 @@ class CTTRMRiskModel:
     ) -> RiskAssessment:
         features: list[RiskFeature] = []
         base_reasons = list(context.get("base_reasons", ()))
+        dlp_findings = list(context.get("dlp_findings", ()))
         taint_matches = self.tracker.match_taint(
             tool_name,
             args,
@@ -195,6 +198,7 @@ class CTTRMRiskModel:
         self.collect_action_risk(tool_name, args, features)
         self.collect_boundary_risk(tool_name, args, features)
         self.collect_source_risk(context, features)
+        self.collect_dlp_risk(dlp_findings, features)
         self.collect_taint_risk(taint_matches, tool_name, features)
         self.collect_chain_risk(chain_findings, features)
         self.collect_authorization_adjustment(
@@ -218,7 +222,7 @@ class CTTRMRiskModel:
                     },
                 ))
 
-        hard_deny = self.apply_hard_rules(base_reasons, patterns)
+        hard_deny = self.apply_hard_rules(base_reasons, patterns, dlp_findings)
         total_score = max(0, sum(feature.score for feature in features))
         action, risk_level = self.map_score_to_decision(
             total_score,
@@ -227,6 +231,11 @@ class CTTRMRiskModel:
         )
         reasons = list(dict.fromkeys([
             *base_reasons,
+            *(
+                reason
+                for finding in dlp_findings
+                for reason in finding.get("reasons", [])
+            ),
             *(
                 match.reason for match in taint_matches
             ),
@@ -251,6 +260,7 @@ class CTTRMRiskModel:
             taint_matches,
             chain_findings,
             patterns,
+            dlp_findings,
         )
         return RiskAssessment(
             total_score=total_score,
@@ -259,6 +269,7 @@ class CTTRMRiskModel:
             risk_level=risk_level,
             features=features,
             reasons=reasons,
+            dlp_findings=dlp_findings,
             taint_matches=self.tracker.export_matches(taint_matches),
             chain_findings=chain_findings,
             task_budget=task_budget,
@@ -404,6 +415,28 @@ class CTTRMRiskModel:
             ))
 
     @staticmethod
+    def collect_dlp_risk(
+        findings: list[dict],
+        features: list[RiskFeature],
+    ) -> None:
+        for finding in findings:
+            score = int(finding.get("score") or 0)
+            if not score:
+                continue
+            features.append(RiskFeature(
+                "DLPRisk",
+                score,
+                ",".join(finding.get("reasons", [])) or "dlp_finding",
+                {
+                    "secret_type": finding.get("secret_type"),
+                    "fingerprint": finding.get("fingerprint"),
+                    "masked_value": finding.get("masked_value"),
+                    "location": finding.get("location"),
+                    "sink": finding.get("sink"),
+                },
+            ))
+
+    @staticmethod
     def collect_taint_risk(
         matches: list[TaintMatch],
         tool_name: str,
@@ -508,10 +541,12 @@ class CTTRMRiskModel:
     def apply_hard_rules(
         base_reasons: list[str],
         patterns: list[RiskPatternFinding],
+        dlp_findings: list[dict],
     ) -> bool:
         return bool(
             HARD_BASE_REASONS.intersection(base_reasons)
             or any(pattern.hard_deny for pattern in patterns)
+            or any(finding.get("hard_deny") for finding in dlp_findings)
         )
 
     def map_score_to_decision(
@@ -545,12 +580,15 @@ class CTTRMRiskModel:
         matches: list[TaintMatch],
         chain: list[ChainRiskFinding],
         patterns: list[RiskPatternFinding],
+        dlp_findings: list[dict],
     ) -> str:
         parts = [
             f"CT-TRM 对 {tool_name} 的风险评分为 {score}，决策为 {action.upper()}。"
         ]
         if hard_deny:
             parts.append("命中不可由任务授权降级的硬拒绝规则。")
+        if dlp_findings:
+            parts.append("DLP 检测到敏感数据证据，并已使用脱敏摘要记录。")
         if matches:
             sources = "、".join(sorted({match.source.origin for match in matches}))
             parts.append(f"检测到来自 {sources} 的参数污染传播。")

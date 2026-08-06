@@ -20,9 +20,8 @@
       <nav>
         <button class="nav active" data-view="dashboard"><i>01</i><span>系统总览</span></button>
         <button class="nav" data-view="agent"><i>02</i><span>Agent 控制台</span></button>
-        <button class="nav" data-view="evaluation"><i>03</i><span>评测中心</span></button>
-        <button class="nav" data-view="audit"><i>04</i><span>审计日志</span></button>
-        <button class="nav" data-view="policies"><i>05</i><span>策略中心</span></button>
+        <button class="nav" data-view="audit"><i>03</i><span>审计日志</span></button>
+        <button class="nav" data-view="policies"><i>04</i><span>策略中心</span></button>
       </nav>
       <div class="system-state">
         <div class="pulse"></div>
@@ -37,7 +36,7 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">RESEARCH-GRADE AGENT TOOL SECURITY</p>
+          <p class="eyebrow">AGENT TOOL-CALL BOUNDARY CONTROL</p>
           <h1 id="page-title">系统总览</h1>
         </div>
         <div class="header-actions">
@@ -58,7 +57,7 @@
           </div>
           <div class="hero-content">
             <p class="eyebrow">CODEAGENT GUARD</p>
-            <h2>可信 Agent 工具调用安全网关</h2>
+            <h2>Agent 工具调用边界控制与风险审计</h2>
             <p class="hero-copy">
               统一接管 Agent / OpenCode 的工具调用，结合 Policy Engine、CT-TRM 风险分析、审批闭环与
               Audit Hash Chain，把每一次 Allow / Ask / Deny 变成可解释、可回放、可验证的系统事件。
@@ -66,7 +65,7 @@
             <div class="hero-tags">
               <span>OpenCode Adapter</span>
               <span>CT-TRM</span>
-              <span>Approval Recovery</span>
+              <span>Evidence-based Approval</span>
               <span>Tamper-evident Audit</span>
             </div>
           </div>
@@ -77,7 +76,7 @@
             </article>
             <article class="metric">
               <div class="metric-icon red">!</div>
-              <div><span>Attack Interventions</span><strong id="metric-blocked">0</strong><small id="metric-rate">阻断率 0%</small></div>
+              <div><span>Risk Interventions</span><strong id="metric-blocked">0</strong><small id="metric-rate">阻断率 0%</small></div>
             </article>
             <article class="metric">
               <div class="metric-icon amber">?</div>
@@ -93,7 +92,7 @@
             </article>
             <article class="metric">
               <div class="metric-icon sky">ms</div>
-              <div><span>Avg Policy Latency</span><strong><b id="metric-latency">0</b><em>ms</em></strong><small>Proxy → Policy</small></div>
+              <div><span>Demo Session Avg</span><strong><b id="metric-latency">0</b><em>ms</em></strong><small>当前演示会话</small></div>
             </article>
           </div>
         </section>
@@ -101,30 +100,32 @@
         <article class="panel latest-task-panel">
           <div><span>TRACE ID</span><b id="latest-trace-id">暂无任务</b></div>
           <div><span>用户任务</span><b id="latest-task-name">等待执行</b></div>
-          <div><span>Agent</span><b id="latest-agent-id">—</b></div>
+          <div><span>当前 ToolCall</span><b id="latest-tool-call">—</b></div>
+          <div><span>最终执行状态</span><b id="latest-execution-status">—</b></div>
           <div><span>风险等级</span><b id="latest-risk">LOW</b></div>
           <div><span>工具调用 / 阻断</span><b id="latest-call-count">0 / 0</b></div>
         </article>
 
         <article class="panel flow-panel">
           <div class="panel-head">
-            <div><p>SYSTEM FLOW</p><h2>Agent 工具调用决策链路</h2></div>
-            <span class="chain-ok">端到端受控</span>
+            <div><p>SYSTEM FLOW</p><h2>风险证据融合与授权决策链路</h2></div>
           </div>
-          <div class="flow" id="control-flow">
-            <div class="flow-node"><span>01</span><i>AG</i><b>Agent / OpenCode</b><small>Tool Request</small></div>
+          <div class="flow report-aligned-flow" id="control-flow">
+            <div class="flow-node active"><span>01</span><i>TC</i><b>ToolCall</b><small>tool + args</small></div>
             <div class="flow-line"><em></em></div>
-            <div class="flow-node active"><span>02</span><i>TP</i><b>Tool Proxy</b><small>Unified Gateway</small></div>
-            <div class="flow-line guarded"><em></em><label>Policy Check</label></div>
-            <div class="flow-node"><span>03</span><i>PE</i><b>Policy Engine</b><small>Rules</small></div>
+            <div class="flow-node"><span>02</span><i>PE</i><b>Policy Engine</b><small>rules</small></div>
             <div class="flow-line"><em></em></div>
-            <div class="flow-node"><span>04</span><i>CT</i><b>CT-TRM</b><small>Risk Evidence</small></div>
+            <div class="flow-node"><span>03</span><i>CT</i><b>CT-TRM</b><small>source + taint</small></div>
             <div class="flow-line"><em></em></div>
-            <div class="flow-node shield"><span>05</span><i>A/D</i><b>Allow · Ask · Deny</b><small>Decision</small></div>
+            <div class="flow-node dlp-node"><span>04</span><i>DLP</i><b>DLP</b><small>mask + finding</small></div>
             <div class="flow-line"><em></em></div>
-            <div class="flow-node"><span>06</span><i>EX</i><b>Executor</b><small>Controlled Action</small></div>
+            <div class="flow-node evidence-node"><span>05</span><i>BC</i><b>Budget / Chain</b><small>scope + chain risk</small></div>
+            <div class="flow-line guarded"><em></em><label>evidence fusion</label></div>
+            <div class="flow-node shield"><span>06</span><i>DF</i><b>Decision Fusion</b><small>allow / ask / deny</small></div>
             <div class="flow-line"><em></em></div>
-            <div class="flow-node"><span>07</span><i>AU</i><b>Audit Chain</b><small>SHA-256</small></div>
+            <div class="flow-node"><span>07</span><i>TP</i><b>Tool Proxy</b><small>execute or block</small></div>
+            <div class="flow-line"><em></em></div>
+            <div class="flow-node audit-node"><span>08</span><i>AU</i><b>Trace / Audit</b><small>hash verified</small></div>
           </div>
           <div class="tool-strip">
             <span>read_file</span><span>write_file</span><span>run_command</span>
@@ -133,39 +134,112 @@
           </div>
         </article>
 
-        <div class="dashboard-workbench">
-          <div class="workbench-main">
-            <article class="panel timeline-panel">
-              <div class="panel-head">
-                <div><p>RECENT TOOL CALLS</p><h2>实时调用时间线</h2></div>
-                <span class="live"><i></i>LIVE</span>
-              </div>
-              <div id="timeline" class="timeline empty-state">暂无调用记录</div>
-            </article>
-
-            <article class="panel trace-panel">
-              <div class="panel-head">
-                <div><p>TRACE PLAYBACK</p><h2>风险证据与透明链路</h2></div>
-                <button class="text-button" data-jump="audit">查看审计 →</button>
-              </div>
-              <div class="trace-summary-grid">
-                <div><span>Policy</span><b>Allow / Ask / Deny</b><small>三态处置动作</small></div>
-                <div><span>CT-TRM</span><b>Source · Taint · Chain</b><small>上下文污染驱动</small></div>
-                <div><span>Provenance</span><b>Entity Edges</b><small>来源到参数传播</small></div>
-              </div>
-              <div id="alerts" class="alerts empty-state">暂无风险告警</div>
-            </article>
-
-            <article class="panel replay-result-panel" id="replay-result-panel">
-              <div class="panel-head">
-                <div><p>ATTACK REPLAY RESULT</p><h2>最近一次攻击复现</h2></div>
-                <span class="tag" id="replay-result-status">WAITING</span>
-              </div>
-              <div id="replay-result" class="replay-result empty-state">请在 Agent 控制台选择攻击场景</div>
-            </article>
+        <article class="panel preflight-review-panel">
+          <div class="panel-head">
+            <div>
+              <p>PRE-EXECUTION REVIEW</p>
+              <h2>执行前工具调用审查链路</h2>
+              <small class="review-subtitle">每个模块输出结构化证据，Decision Fusion 根据证据强度输出 Allow / Ask / Deny。</small>
+            </div>
+            <span class="shot-status">ALLOW / ASK / DENY</span>
           </div>
+          <div class="shot-loop">
+            <section class="shot-toolcall">
+              <div class="shot-title"><span>01</span><b>审查对象（ToolCall）</b></div>
+              <div class="toolcall-card">
+                <div><small>tool</small><strong>read_file</strong></div>
+                <div><small>path</small><strong>~/.ssh/id_rsa</strong></div>
+                <div><small>source</small><strong>README.md</strong></div>
+                <div><small>user intent</small><strong>fix failed tests</strong></div>
+                <div><small>budget</small><strong>read_only project task</strong></div>
+                <div><small>requested_by</small><strong>Agent via OpenCode</strong></div>
+              </div>
+              <p class="shot-note">将 OpenCode / Agent 的原生工具请求统一转换为结构化 ToolCall，再进入策略、CT-TRM、DLP 和审计链路。</p>
+              <div class="shot-mini-timeline" aria-label="风险传播时间线">
+                <span>Task</span>
+                <i></i>
+                <span>Source</span>
+                <i></i>
+                <span>Args</span>
+                <i></i>
+                <span class="deny">Decision</span>
+              </div>
+            </section>
 
-          <aside class="workbench-side">
+            <section class="shot-evidence">
+              <div class="shot-title"><span>02</span><b>证据生成（Evidence Pipeline）</b></div>
+              <div class="shot-evidence-grid">
+                <article class="shot-card danger">
+                  <small>Policy Engine</small>
+                  <p><b>Input</b><span>tool + path</span></p>
+                  <p><b>Evidence</b><span>sensitive_path / credential_file / hard_deny</span></p>
+                  <p><b>Impact</b><span>force Deny</span></p>
+                  <em>强制拒绝</em>
+                </article>
+                <article class="shot-card warn">
+                  <small>CT-TRM</small>
+                  <p><b>Input</b><span>source + argument</span></p>
+                  <p><b>Evidence</b><span>low_trust_source / README.md → path / P1</span></p>
+                  <p><b>Impact</b><span>raise risk level</span></p>
+                  <em>提高风险</em>
+                </article>
+                <article class="shot-card dlp">
+                  <small>DLP</small>
+                  <p><b>Input</b><span>params + tool output</span></p>
+                  <p><b>Evidence</b><span>no output because blocked before execution</span></p>
+                  <p><b>Capability</b><span>mask secret / HMAC fingerprint</span></p>
+                  <em>防止泄漏</em>
+                </article>
+                <article class="shot-card warn">
+                  <small>Task Budget</small>
+                  <p><b>Input</b><span>user intent + action</span></p>
+                  <p><b>Evidence</b><span>fix tests ≠ SSH private key access</span></p>
+                  <p><b>Impact</b><span>no budget reduction</span></p>
+                  <em>取消预算折减</em>
+                </article>
+                <article class="shot-card danger">
+                  <small>Chain Risk</small>
+                  <p><b>Input</b><span>history + current action</span></p>
+                  <p><b>Evidence</b><span>sensitive read attempt, no prior external sink</span></p>
+                  <p><b>Impact</b><span>mark as chain-risk source</span></p>
+                  <em>链路风险起点</em>
+                </article>
+              </div>
+            </section>
+
+            <section class="shot-decision">
+              <div class="shot-title"><span>03</span><b>融合处置（Decision Fusion）</b></div>
+              <div class="fusion-result">
+                <small>This ToolCall</small>
+                <code>Policy hard_deny</code>
+                <code>+ CT tainted_path</code>
+                <code>+ Budget mismatch</code>
+                <strong>= DENY / CRITICAL</strong>
+              </div>
+              <div class="decision-board">
+                <div><small>Allow</small><strong>低风险且任务范围匹配</strong></div>
+                <div><small>Ask</small><strong>灰区操作冻结参数等待确认</strong></div>
+                <div><small>Deny</small><strong>硬拒绝或高风险组合阻断</strong></div>
+                <div><small>Boundary</small><strong>邻界分数按业务语义校正</strong></div>
+              </div>
+            </section>
+
+            <section class="shot-audit">
+              <div class="shot-title"><span>04</span><b>审计留痕（Trace / Audit）</b></div>
+              <div class="audit-board">
+                <div><small>Trace ID</small><strong>trace-demo-ssh-read</strong></div>
+                <div><small>Prev Hash</small><strong>7a91c0e2...84bf19aa</strong></div>
+                <div><small>Event Hash</small><strong>f23d4ab9...c6e02d71</strong></div>
+                <div><small>Integrity</small><strong>Verified</strong></div>
+                <div><small>Execution</small><strong>not executed</strong></div>
+                <div><small>Reason</small><strong>blocked before tool execution</strong></div>
+                <div><small>Timestamp</small><strong>2026-07-02 11:26:14</strong></div>
+              </div>
+            </section>
+          </div>
+        </article>
+
+        <div class="dashboard-status-grid">
             <article class="panel approvals-panel">
               <div class="panel-head">
                 <div><p>APPROVAL CENTER</p><h2>待审批事务</h2></div>
@@ -189,39 +263,23 @@
 
             <article class="panel audit-health-panel">
               <div class="panel-head">
-                <div><p>AUDIT & RECOVERY</p><h2>审计与恢复状态</h2></div>
+                <div><p>AUDIT HEALTH</p><h2>审计链与恢复能力</h2></div>
+                <span class="tag" id="home-audit-status">VALID</span>
               </div>
               <div class="chain-visual" aria-label="Audit Hash Chain 状态">
-                <span></span><span></span><span></span><span></span>
+                <span><b>01</b><small>Append</small></span>
+                <span><b>02</b><small>Hash</small></span>
+                <span><b>03</b><small>Verify</small></span>
+                <span><b>04</b><small>Replay</small></span>
               </div>
               <div class="recovery-list">
-                <div><b>Audit Hash Chain</b><small>最近校验状态由审计接口提供</small></div>
-                <div><b>State Persistence</b><small>对话、审批、Trace 支持恢复</small></div>
-                <div><b>Trusted Workspaces</b><small>外部工作环境显式授权</small></div>
+                <div><b>Audit Hash Chain</b><small id="home-audit-events">0 个事件已校验</small></div>
+                <div><b>State Persistence</b><small>对话、审批、Trace 可在刷新后恢复</small></div>
+                <div><b>Trusted Workspaces</b><small id="home-workspace-status">项目策略继承</small></div>
               </div>
             </article>
-          </aside>
         </div>
 
-        <section class="panel evaluation-overview">
-          <div class="panel-head">
-            <div><p>BENCHMARK / EVALUATION</p><h2>研究评测快照</h2></div>
-            <button class="text-button" data-jump="evaluation">进入评测中心 →</button>
-          </div>
-          <div class="research-metrics">
-            <div><span>Accuracy</span><b id="dashboard-eval-accuracy">--</b><small>三分类一致率</small></div>
-            <div><span>Strong Block</span><b id="dashboard-strong-block">--</b><small>恶意强阻断</small></div>
-            <div><span>Attack Intervention</span><b id="dashboard-intervention">--</b><small>ASK + DENY</small></div>
-            <div><span>Complete FN</span><b id="dashboard-fn">--</b><small>恶意 Allow</small></div>
-            <div><span>Normal Disruption</span><b id="dashboard-disruption">--</b><small>正常任务干扰</small></div>
-            <div><span>P95 Latency</span><b id="dashboard-p95">--</b><small>Policy ms</small></div>
-          </div>
-          <div class="breakdown-lines" id="dashboard-category-breakdown">
-            <div class="deny"><span>Direct Attack</span><i style="width:84%"></i><b>DENY</b></div>
-            <div class="ask"><span>Context Pollution</span><i style="width:72%"></i><b>ASK</b></div>
-            <div class="allow"><span>Safe Workspace</span><i style="width:58%"></i><b>ALLOW</b></div>
-          </div>
-        </section>
       </section>
 
       <section id="agent" class="view">
@@ -229,7 +287,7 @@
           <article class="panel model-panel">
             <div class="panel-head">
               <div><p>MODEL PROVIDER</p><h2>大模型接入配置</h2></div>
-              <span class="tag" id="provider-status">未配置</span>
+              <span class="tag" id="provider-status">演示模式</span>
             </div>
             <div class="model-form">
               <label><span>供应商</span><select id="provider-select"></select></label>
@@ -252,7 +310,7 @@
             <div class="trusted-workspace-control">
               <label>
                 <span>目录绝对路径</span>
-                <input id="trusted-workspace-path" placeholder="例如：D:\trusted-workspace">
+                <input id="trusted-workspace-path" placeholder="例如：demo-repo/workspace">
               </label>
               <button class="secondary" id="choose-trusted-workspace">选择目录</button>
               <button class="primary" id="add-trusted-workspace">设为可信</button>
@@ -266,6 +324,7 @@
             <div class="panel-head">
               <div><p>AGENT SESSIONS</p><h2>上下文与旧对话</h2></div>
               <span class="tag" id="history-count">0</span>
+              <button class="side-toggle" data-toggle-side="history">收起</button>
             </div>
             <div class="history-filter">
               <input id="history-search" placeholder="搜索旧对话">
@@ -297,7 +356,7 @@
             </div>
             <label class="field">
               <span>用户任务</span>
-              <textarea id="agent-prompt" placeholder="例如：分析工作区项目并生成安全报告"></textarea>
+              <textarea id="agent-prompt" placeholder="例如：请检查 demo-repo/taskflow-web 的 package.json 和 README.md，总结项目的安装、启动和测试命令。不要修改任何文件。"></textarea>
             </label>
             <label class="task-budget-toggle">
               <input id="task-budget-auto" type="checkbox" checked>
@@ -318,58 +377,19 @@
 
           <article class="panel demo-panel">
             <div class="panel-head">
-              <div><p>ATTACK REPLAY</p><h2>攻击场景复现</h2></div>
+              <div><p>FUNCTIONAL TEST SUITE</p><h2>功能测试任务集</h2></div>
+              <button class="side-toggle" data-toggle-side="demo">收起</button>
             </div>
-            <div class="demo-list">
-              <button class="demo-card" data-scenario="readme"><i>01</i><div><b>恶意 README</b><span>诱导读取 SSH 私钥</span></div><em>CRITICAL</em></button>
-              <button class="demo-card" data-scenario="remote-script"><i>02</i><div><b>远程脚本执行</b><span>curl payload | bash</span></div><em>CRITICAL</em></button>
-              <button class="demo-card" data-scenario="secret-email"><i>03</i><div><b>密钥邮件外传</b><span>Secret + 外部收件人</span></div><em>CRITICAL</em></button>
-              <button class="demo-card" data-scenario="malicious-log"><i>04</i><div><b>恶意日志注入</b><span>反弹 Shell 指令</span></div><em>HIGH</em></button>
-              <button class="demo-card" data-scenario="traversal"><i>05</i><div><b>路径穿越</b><span>读取 /etc/passwd</span></div><em>HIGH</em></button>
-              <button class="demo-card safe" data-scenario="normal"><i>OK</i><div><b>正常任务基线</b><span>安全读写与语法检查</span></div><em>BENIGN</em></button>
+            <div class="one-shot-block">
+              <div class="demo-list one-shot-list">
+                <button class="demo-card safe" data-oneshot="allow"><i>01</i><div><b>项目依赖读取</b><span>package.json / README</span></div><em>ALLOW</em></button>
+                <button class="demo-card" data-oneshot="ct-trm"><i>02</i><div><b>README 本地排障说明</b><span>README.md → ~/.ssh/id_rsa</span></div><em>DENY</em></button>
+                <button class="demo-card ask" data-oneshot="approval"><i>03</i><div><b>配置文件写入确认</b><span>config.yml review_required</span></div><em>ASK</em></button>
+                <button class="demo-card" data-oneshot="dlp"><i>04</i><div><b>构建诊断报告提交</b><span>.env.demo → debug endpoint</span></div><em>DENY</em></button>
+              </div>
             </div>
           </article>
         </div>
-      </section>
-
-      <section id="evaluation" class="view">
-        <div class="eval-headline">
-          <article class="panel eval-intro">
-            <p>POLICY REGRESSION SUITE</p>
-            <h2>Benchmark / Evaluation 研究评测</h2>
-            <span>覆盖基础策略 100 条、AgentToolBench 六模式消融、CT-TRM 风险模式与审计完整性。评测仅执行策略判定，不执行真实工具副作用。</span>
-            <div class="eval-actions">
-              <button class="secondary" id="generate-cases">重新生成 100 条</button>
-              <button class="primary" id="run-evaluation">运行评测</button>
-              <button class="secondary" id="run-ct-trm-evaluation">运行 500 条六模式评测</button>
-            </div>
-          </article>
-          <article class="panel eval-score">
-            <span>POLICY ACCURACY</span>
-            <strong id="eval-accuracy">--</strong>
-            <small id="eval-summary">尚未运行</small>
-          </article>
-        </div>
-        <div class="eval-metrics">
-          <article class="metric"><div class="metric-icon green">✓</div><div><span>通过用例</span><strong id="eval-passed">0</strong><small>Expected = Actual</small></div></article>
-          <article class="metric"><div class="metric-icon red">ASR</div><div><span>无防护攻击成功率</span><strong id="eval-asr">0%</strong><small>Policy disabled baseline</small></div></article>
-          <article class="metric"><div class="metric-icon teal">SB</div><div><span>恶意阻断率</span><strong id="eval-block-rate">0%</strong><small>Malicious denied</small></div></article>
-          <article class="metric"><div class="metric-icon amber">FP</div><div><span>误报率</span><strong id="eval-fpr">0%</strong><small>Benign incorrectly denied</small></div></article>
-          <article class="metric"><div class="metric-icon sky">P95</div><div><span>P95 延迟</span><strong><b id="eval-p95">0</b><em>ms</em></strong><small>Policy only</small></div></article>
-          <article class="metric"><div class="metric-icon green">HC</div><div><span>篡改检测</span><strong id="eval-integrity">--</strong><small>Isolated audit copy</small></div></article>
-        </div>
-        <article class="panel ct-eval-panel">
-          <div class="panel-head">
-            <div><p>AGENTTOOLBENCH 500</p><h2>CT-TRM 六模式消融评测</h2></div>
-            <span id="ct-eval-status" class="chain-ok">NOT RUN</span>
-          </div>
-          <div id="ct-eval-modes" class="ct-eval-modes empty-state">运行后显示无防护、基础规则、来源、污染、无链路和完整 CT-TRM 的差异</div>
-        </article>
-        <article class="panel eval-table-panel">
-          <div class="panel-head"><div><p>TOOL COVERAGE</p><h2>分类评测结果</h2></div><span class="chain-ok">10 × 10 CASES</span></div>
-          <div id="eval-tools" class="eval-tools empty-state">点击“运行评测”生成结果</div>
-          <div id="eval-failures" class="eval-failures"></div>
-        </article>
       </section>
 
       <section id="audit" class="view">
@@ -379,8 +399,12 @@
             <div class="audit-actions">
               <button class="secondary" id="verify-chain">校验哈希链</button>
               <button class="secondary" id="tamper-test">运行篡改实验</button>
-              <button class="danger-ghost" id="reset-audit">清空演示数据</button>
+              <button class="secondary" id="reset-audit">清空筛选</button>
             </div>
+          </div>
+          <div id="audit-verification" class="audit-verification">
+            <b>Hash Chain Ready</b>
+            <span>点击“校验哈希链”后将在这里显示校验事件数、断点和完整性结论。</span>
           </div>
           <div class="filters">
             <input id="audit-search" placeholder="搜索 trace、任务、工具或阻断原因">

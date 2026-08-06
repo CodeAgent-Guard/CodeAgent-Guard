@@ -1,0 +1,2327 @@
+  □                 □
+                    ✓
+
+
+
+
+CodeAgent-Guard
+
+
+
+             2026   6   29
+1.
+
+
+2.   A4   1.5
+
+
+3.
+
+
+4.
+
+
+5.
+...............................................................................                                                                          1
+                         ................................................................                                                                2
+1.1                          ..............................................................                                                              2
+1.2                          ..............................................................                                                              4
+1.3                          ..............................................................                                                              6
+1.4                                   .........................................................                                                          8
+                                      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+2.1                                   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+2.2                                                 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+2.3                                                                                           . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+2.4                                                              . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+2.5                                                          Agent                  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+                                      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+3.1                                                 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 27
+3.2                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+3.3                                                          . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+3.4                                             . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+3.5                                                                    . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+                             . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 50
+                             . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 52
+      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 53
+2.1   CodeAgent Guard               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+2.2                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+2.3   CT-TRM                                       . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+2.4   DLP      /                        . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+2.5   Allow / Ask / Deny                       . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+2.6   Transparency Trace                    . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+2.7   Audit Hash Chain     . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+2.8   OpenCode Adapter                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+3.1                                                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+3.2         README               SSH                                  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 47
+3.3         .env                                   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 47
+3.4          metadata                       SSRF                          . . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+1.1    AI             Agent                                             ...................................                                     2
+1.2    AI        Agent                                   ...........................................                                            3
+1.3                          AI              Agent                                    ............................                              6
+1.4    CodeAgent-Guard                                           .......................................                                        7
+1.5    CodeAgent-Guard                                           .......................................                                        9
+2.1                                                          . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+2.2                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+2.3    Policy Engine                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+2.4    Source                                  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+2.5                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+2.6    Policy Engine CT-TRM                       DLP                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+2.7                                                               . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+2.8    Trace                                     . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+3.1                                                          . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+3.2                                                . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 29
+3.3                      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+3.4                                                                   . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+3.5                                                      . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+3.6    AgentToolBench 500                                        . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+3.7                                         . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 39
+3.8    DLP                                  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 40
+3.9    DLP      Transparency Trace                  Audit Hash Chain                             . . . . . . . . . . . . . . . . . . . . . . 41
+3.10                                  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+3.11                              . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 45
+    AI                   AI Coding Agent
+
+
+                                                                          README
+
+
+                                     SSH
+
+
+
+
+                               CodeAgent-Guard
+                                  Tool Proxy                                ToolCall
+          Policy Engine CT-TRM Context-Taint Tool Risk Model
+    DLP    Data Loss Prevention                                    Decision Fusion
+Allow/Ask/Deny                                               Transparency Trace
+SHA-256                                                                     473
+                   352                               344                 97.73%
+AgentToolBench 500                             CT-TRM      98.0%              132
+    10      DLP
+
+
+
+
+              AI
+
+
+
+
+                                           1    56
+1.1
+                                                                         AI
+
+
+                  ReAct
+                         [18]     Toolformer
+      API [15]                          AI
+
+
+                         AI                                               Stack Overflow 2025
+                 83.8%                                              AI
+                     50.6% [16] GitHub Copilot 2025                                   2000
+                     [19]                       AI
+
+
+
+                              1.1: AI                     Agent
+
+
+
+                  Stack Overflow 2025                               AI
+                 84%                                         AI
+
+                                  51% [16]
+                 GitHub Copilot                              2000
+                                                      [19]          CI/CD              AI
+
+
+                     Agent
+                      API
+
+
+                                               [16]
+                 NIST AI RMF                   AI                   AI        Agent
+
+                                         [9]
+
+
+      AI     Agent
+
+
+                                                      2      56
+                                     Agent                                   Shell
+
+
+
+
+                                       README
+
+
+    OWASP 2025                  LLM                            Prompt Injection Sensitive In-
+formation Disclosure   Insecure Plugin Design         Excessive Agency                        [11]
+OWASP 2026                             Agentic Applications
+                                                                                     [10]
+
+                             1.2: AI          Agent
+
+
+      README
+
+
+
+                                                        URL
+                         Agent                         .env               API Key        Token
+                                     secret             HTTP
+
+
+
+
+                                       1                       Agent
+                                                                         2
+                             Shell                                                        3
+                                      README
+                         4                                                       Agent
+
+
+           AI      Agent
+                                                          CodeAgent-Guard
+                               Agent
+
+
+
+
+                                              3   56
+1.2
+AI       Agent                                                                  AI
+
+
+
+
+1.2.1                        Agent
+
+ReAct
+                             [18]     Toolformer
+                 API [15]                   AutoGPT LangChain Open Interpreter
+IDE Agent    MCP
+
+
+
+
+      AgentDojo                            Agent
+                                                   [2] ConfusedPilot     RAG
+                                                                  [12]
+                   LLM
+                     Agent
+
+1.2.2
+
+                                                   OWASP LLM Top 10        Prompt Injection
+
+
+                               [11]
+
+
+                             Agent
+
+
+
+
+                                      AI        Agent
+
+
+
+
+                                            4      56
+1.2.3    AI Agent
+
+NIST AI RMF                          AI                              AI
+                                                              [9]   OWASP LLM Top 10
+
+
+                    [11] OWASP 2026       Agentic Applications Top 10
+        LLM                                                                      Agent
+[10]                                                   Agent
+                       Agent
+
+
+                                          AI          Agent
+
+
+
+
+1.2.4                    DevSecOps
+
+                                                  SAST                      SCA
+       CI/CD                         DLP
+                                AI            Agent                         Agent
+                                                         CI/CD
+                                                                                Agent
+
+
+                                     Agent                          read_file
+
+
+               Shell
+
+
+
+
+                                                                Agent
+                                                                                    AI
+Agent
+   Agent
+
+
+
+
+                                          5      56
+                  1.3:                          AI        Agent
+
+                                                                   AI      Agent
+  Agent
+
+
+
+
+  AI                          Agentic AI
+
+  SAST/DAST/SCA
+
+
+             DLP
+                                                             Agent
+
+
+
+
+1.3
+CodeAgent-Guard          AI        Agent                                           Agent
+                                                                  Agent
+
+
+
+
+                              AI        Agent
+          CodeAgent-Guard                                                 Agent
+
+
+
+
+                                   AI       Agent
+
+
+
+
+README                                                                    URL
+          CodeAgent-Guard               CT-TRM
+
+
+                                           6         56
+                            Agent
+      API Key    Token                      CodeAgent-Guard
+                                                secret
+
+
+
+
+                          AI        Agent
+                                                               Agent
+                                                     CodeAgent-Guard
+Allow/Ask/Deny
+
+
+
+
+                         AI Agent
+                                                         CodeAgent-Guard
+
+
+
+
+                 1.4: CodeAgent-Guard
+
+
+
+
+                   README
+                                            secret
+
+
+
+
+                                7     56
+1.4
+      AI                                                            Agent
+DevSecOps                                      DevSecOps
+                                   AI          Agent
+
+
+
+
+                                  CodeAgent-Guard                   AI        Agent
+
+
+                                                              CI/CD
+        AI Agent        IDE                                                Agent
+                                                           CodeAgent-Guard
+             AI Agent
+
+
+                              AI Agent
+             README                 Issue                             Agent           CodeAgent-
+Guard                                                      Agent
+
+
+              Agent                           CodeAgent-Guard
+  AI Agent                              MCP Server
+                                  Agent
+
+
+                                                                              CodeAgent-Guard
+             Agent
+                   AI     Agent
+                                                                    Agent
+                                                  CodeAgent-Guard
+                                                                   Agent
+                                                      AI      Agent
+
+
+
+
+                                          8      56
+                1.5: CodeAgent-Guard
+
+
+    DevSecOps      AI Agent               AI
+                   CI/CD          API
+
+                                                README
+                                                  Agent
+
+Agent                                   Agent
+                      MCP Server
+                       AI Agent                 AI
+
+
+
+
+                              9    56
+2.1
+          AI       Agent
+
+
+                                                                   CodeAgent
+Guard      Agent
+
+
+                            AI     Agent
+
+
+
+
+                      2.1
+
+
+
+
+                            2.1: CodeAgent Guard
+
+
+          2.1                      Agent           Agent Adapter     ToolCall
+      Tool Proxy             Policy Engine CT-TRM        DLP
+                                                Decision Fusion    Allow Ask
+
+
+                                     10    56
+Deny    Approval / Executor                         Trace / Audit / Dashboard
+
+
+
+
+1. Agent / Adapter                                                     AI
+     Agent           Agent
+                                             ToolCall
+                                                 Agent
+
+2. Tool Proxy                 Agent
+
+
+                Agent
+
+
+
+
+3.                                      Policy Engine CT-TRM        DLP
+                                                    Policy Engine
+                                                                    CT-TRM
+                                                                            DLP
+                              secret Token
+
+
+
+4.
+                               Allow Ask     Deny
+
+
+
+
+5.
+
+
+
+
+                                 11    56
+                 Agent
+
+
+
+                                   2.2                                       2.3
+                                 2.4
+2.5
+
+2.2
+      CodeAgent Guard
+      Shell                                                                  Agent
+
+
+
+
+2.2.1                    Agent
+
+                                           Agent
+README                                                              HTTP
+                                                                                     URL
+              Shell                    Agent
+                                                                           metadata
+
+
+                  Agent                        Agent
+   ToolCall
+                                                     Agent
+                                                                                     Guard
+                                                    Tool Proxy
+
+2.2.2
+
+                                       .env SSH                  Token
+                                                                             Shell
+                                                                                ToolCall
+
+
+                                          12   56
+              CodeAgent Guard
+                                   SSRF
+
+
+
+
+2.2.3
+
+                                                                                      Guard
+
+
+                                                                                       DLP
+                                  secret
+                      WORM                                               Tool Proxy
+   ToolCall
+
+2.2.4
+
+                                                                                2.1
+
+                           2.1:
+
+
+
+           README
+                                                                 CT-TRM           2.3.4
+
+   Agent
+                                                                Tool Proxy        2.3.1
+
+        .env SSH Key                                            Policy Engine DLP
+                                                                     2.3.3 2.3.5
+               URL   metadata                                   Policy Engine          2.3.3
+        localhost
+
+                                                                 CT-TRM           2.3.4
+
+                                           Allow / Ask / Deny   Decision Fusion           2.4
+
+
+                                                                Trace / Audit         2.5
+
+
+
+
+                                             13     56
+                                                                        SSRF
+                         secret
+
+2.3
+      Tool Proxy     CodeAgent Guard                                                       ToolCall
+
+
+Allow / Ask / Deny                                             2.4
+
+2.3.1                                   ToolCall
+
+                 Agent
+          Agent                                                      Tool Proxy
+                                                      Agent
+                         Tool Proxy
+      ToolCall
+
+
+                            URL
+schema                                                         2.2
+
+                                         2.2:
+
+
+
+
+                                          URL
+
+
+
+
+                                                                             API Key   Token
+                                                                                       secret
+
+
+
+
+2.3.2
+
+                                  2.2           Adapter                                ToolCall       Tool
+Proxy       Policy Engine CT-TRM                DLP Policy Engine                                 CT-TRM
+
+                                                 14       56
+                             DLP
+
+
+
+
+                                  2.2:
+
+
+2.3.3     Policy Engine
+
+     Policy Engine        Tool Proxy
+                                                           Policy Engine
+                                         ToolCall
+    read_file                                                                run_command
+
+
+http_request                             URL     IP                                      metadata
+
+
+    Policy Engine                              2.3
+
+                                2.3: Policy Engine
+
+
+
+                                                                              Allow
+                                                                       Ask / Deny
+                                                                   Deny
+                                                                               Allow / Ask
+        Shell                                                                      Shell
+                                                                       Deny
+                     URL                   IP                                    Allow / Ask
+                             localhost metadata                            metadata     Deny
+                                                                                   Ask
+                                                              secret    Deny
+                                                                                   Ask
+                                                                                 Deny
+
+
+
+                                            15        56
+                            Policy Engine
+
+
+                  ../                     URL
+
+
+                                                  SSH          .env
+
+
+                                                                                       Allow
+                                    Ask      Deny
+           Deny
+           run_command Policy Engine
+
+
+                                                                                   Allow
+
+
+                                          Ask
+                        Shell        Shell
+                            payload                          Deny            cat /.ssh/id_rsa bash
+-c                                                                                           Shell
+                                                     run_command
+                            Policy Engine
+                        localhost                                       metadata
+
+
+
+
+      Policy Engine
+     CT-TRM DLP            Decision Fusion
+
+2.3.4    CT-TRM
+
+      CT-TRM Context-Taint Tool Risk Model
+                                                Source Entity Taint Provenance Graph Task
+Budget     Chain Risk                                README                 HTTP
+                          ToolCall                                    2.3
+
+
+
+                                                16      56
+                                     CT-TRM
+
+
+
+
+                              2.3: CT-TRM
+
+
+Source             Source
+                      Agent                                               README
+             HTTP
+
+
+              2.4
+
+                                 2.4: Source
+
+         Source
+
+                                                                               Task
+                                                         Budget
+
+
+
+
+     Agent
+
+
+
+
+  README
+
+
+
+
+   HTTP
+
+                                                      Source
+
+
+
+
+Entity     Taint            CT-TRM                         URL IP          Webhook
+                                        Entity             Source     Entity   Agent
+                                   Provenance Graph Gp = (Vp , Ep )      Source Entity
+
+
+                                            17   56
+Tool Argument ToolCall        Evidence
+
+
+Task Budget     Chain Risk        Task Budget
+
+
+                                   Bt = ⟨Tallow , Ascope , Seffect ⟩
+
+
+                                                                        Chain Risk
+                                                                                 metadata
+                                                            2.5
+
+                                      2.5:
+
+
+
+
+                         read_file(.env) → send_email                   DLP
+
+                               http_request(GET) →                     Source        Task Budget
+                              write_file/run_command
+   metadata                       169.254.169.254 →
+                                                                         SSRF
+
+                                                   →                    Source          Taint
+
+                                 run_command(cat                       Shell
+    Shell
+                              ~/.ssh/id_rsa) →
+                        README/                        →
+                                                                       Source
+
+
+
+2.3.5   DLP                   /
+
+     DLP Data Loss Prevention                                                                   secret
+              Policy Engine                                 CT-TRM                                 DLP
+                        API Key Token
+               2.4
+
+
+
+
+                                             18        56
+                                    DLP
+
+
+
+
+                               2.4: DLP              /
+
+
+                                 DLP                                                HTTP
+
+
+                                      secret
+                                                                                           DLP
+                                                                                                 2.3
+                                                                      2.4.4
+                                          2.6
+
+                      2.6: Policy Engine CT-TRM                   DLP
+
+
+
+                                                                       URL
+   Policy Engine
+
+
+        CT-TRM                                       provenance
+
+                                                     API Key   Token
+            DLP
+
+
+
+2.3.6
+
+     2.3
+
+
+                              E(c) = {Epolicy , Etaint , Edlp , Echain },
+
+        c          ToolCall                 risk_level reasons
+            DLP          Task Budget                     Chain Risk           2.4          Decision
+Fusion                             Allow        Ask        Deny
+
+                                                19        56
+2.4
+      Policy Engine CT-TRM        DLP
+
+
+                                          CodeAgent Guard             Decision Fusion
+               Allow    Ask     Deny            Approval / Executor
+        2.5
+
+
+
+
+                              Allow / Ask / Deny
+
+
+
+
+                          2.5: Allow / Ask / Deny
+
+
+2.4.1
+
+      Decision Fusion         2.3.6             Policy Taint DLP      Chain Risk
+
+
+                                      Deny ≻ Ask ≻ Allow
+
+                                                                      Shell SSRF
+                                                                           Deny
+
+
+
+
+Ask                     Task Budget
+                                 Allow
+
+
+
+
+                                D(c) = Fuse(E(c), Bt , Hc ),
+
+
+                                           20     56
+        E(c)                 Bt              Hc
+   reasons            evidence
+
+2.4.2     Allow / Ask / Deny
+
+        Allow
+    Ask
+                            Deny                                                      SSRF
+
+
+                                                         2.7
+
+                                 2.7:
+
+
+
+                                                                                     Tool
+        Allow                                                             Executor
+
+                                                       secret
+        Ask
+
+                                                     SSH
+        Deny                                 metadata        curl | sh
+                                                           Token
+
+
+
+2.4.3     Ask
+
+     Ask                     Agent                                 ToolCall
+                Ask
+                                                                 DLP
+
+
+
+
+                                              Tool Executor
+                                                                                        Agent
+
+
+                                              Deny                       Allow
+                Ask
+
+
+
+
+                                        21        56
+2.4.4     Tool Executor
+
+            Allow        Ask                            Tool Executor Executor
+                                                                                      Deny
+                                               Executor
+
+
+
+
+          DLP                                           HTTP            secret
+
+
+
+
+2.4.5           Trace / Audit
+
+      Decision Fusion                                                            Trace / Audit
+Ask                                                                      Executor
+                                                                Trace
+Dashboard                      Agent              2.5
+
+2.5                                      Agent
+
+
+AI         Agent                                                                        Agent
+                                                    DLP
+                    Deny
+
+
+                       CodeAgent Guard    Allow / Ask / Deny                     Transparency
+Trace      Audit Hash Chain
+        Trace                                                                Audit Hash Chain
+
+
+Trace                                                          BackTracker
+                           [4] HOLMES
+[8]
+                                            [1]    CodeAgent Guard      Trace      Hash Chain
+
+
+
+                                          22       56
+                                                              AI Agent
+
+
+
+
+                                    Trace Timeline
+
+
+
+
+                               2.6: Transparency Trace
+
+
+           2.6         Trace Timeline
+                             Deny Trace
+               Ask   Trace
+Allow     Trace                                 Trace
+
+
+
+2.5.1    Transparency Trace
+
+     Transparency Trace
+                                            Agent
+                     Trace                  Agent        Policy      CT-TRM
+         DLP         Decision Fusion                      Audit
+   2.8
+
+
+
+
+                                           23     56
+                                2.8: Trace
+
+                  Trace
+
+                                                                                 Task Budget
+
+             Agent
+                                                  URL
+
+                                                                               SSRF
+           Policy Engine
+
+                                           Source Entity Taint Provenance Graph Task
+                 CT-TRM
+                                                   Budget Chain Risk
+             DLP                                                      secret
+          Decision Fusion              Allow Ask             Deny
+
+
+
+
+         Audit
+                                     Trace
+
+
+
+     Trace                                                   secret            Token
+
+
+                                                         ToolCall
+
+
+
+2.5.2     Audit Hash Chain
+
+     Trace                         Audit Hash Chain
+        CodeAgent Guard      Audit Store            SHA-256
+                  2.7
+
+
+
+
+                               Audit Hash Chain
+
+
+
+
+                                  2.7: Audit Hash Chain
+
+
+                                             24         56
+          i                                     eventi                     hi−1                 hi
+
+
+                                hi = SHA256(hi−1 ∥canonical(eventi )),
+
+
+        canonical(·)                       ∥
+
+
+                         ToolCall                             Decision Fusion     Ask           Tool
+Executor               DLP Deny                Trace
+
+
+
+
+2.5.3     Dashboard
+
+     Dashboard          Trace      Audit Hash Chain
+
+
+                                                              CT-TRM                    DLP
+
+
+
+
+2.5.4           Agent
+
+        CodeAgent Guard                                      Agent Adapter              Agent
+                                ToolCall               2.3           Tool Proxy
+                   Adapter                                    Policy CT-TRM DLP Decision
+Fusion                                         Agent
+
+2.5.5     OpenCode Adapter
+
+    OpenCode Adapter                                         Agent
+          2.8
+
+
+
+
+                                               25      56
+                       OpenCode Adapter
+
+
+
+
+                      2.8: OpenCode Adapter
+
+
+     OpenCode                                        Adapter
+
+
+ToolCall   ToolCall                 Agent                                Allow
+OpenCode                      Ask                  Deny
+
+
+
+2.5.6
+
+                                                         Adapter           ToolCall
+                                            MCP                          Agent IDE
+                      Agent     CI/CD Agent      Adapter
+                            Agent                           Tool Proxy
+CT-TRM                DLP                Trace / Audit
+
+
+
+
+                                    26      56
+                                                   CodeAgent-Guard
+
+
+Agent
+             Shell
+
+
+
+
+                               SSRF                                      secret
+                                               Policy Engine    CT-TRM DLP           Chain
+Risk                        Allow / Ask / Deny
+                                                                               DLP
+Transparency Trace   Audit Hash Chain
+
+
+                      3.1                                                         3.2
+                            3.3                                        3.4
+                         3.5
+
+
+
+3.1
+
+
+
+
+                                                      Shell
+                                       Policy Engine    CT-TRM DLP           Chain Risk
+
+
+                                       Allow / Ask / Deny
+                                      Transparency Trace      Audit Hash Chain
+
+
+  3.1
+
+
+
+
+                                        27    56
+                               3.1:
+
+
+
+                                                                     Tool Proxy Policy
+                                                                     Engine CT-TRM DLP              3.2
+                       DLP
+                                                                     Decision Fusion
+                                                                     Policy Engine CT-TRM
+                 AgentToolBench 500
+                                                                     DLP Task Budget                3.3
+                                                                     Chain Risk
+
+                 Objective Evaluation                                Decision Fusion
+                                                                                                    3.4
+                           Semi-real Agent                           Approval Tool Executor
+
+                                                                     Tool Proxy DLP
+                             DLP
+                                                                     Transparency Trace             3.4
+                                                                     Audit Hash Chain
+                                                                     Transparency Trace
+                                                                     Audit Hash Chain               3.5
+                                                                     Dashboard
+
+
+
+
+                    CodeAgent-Guard           Tool Proxy                 Decision Fusion Approval
+  Tool Executor Transparency Trace                  Audit Hash Chain
+         WSL2                                       16        CPU   7965008 kB
+Python 3.10.12        Node v20.20.2                      mock/sandbox
+         metadata            secret          DLP
+SQLite
+    blind LLM
+
+
+
+
+                                                                                              DLP
+                                                                                          3.2
+     CodeAgent-Guard                                                                                Agent
+             secret                [6, 2, 13, 7]         JSONL            schema              payload
+
+
+                                                                                      CT-TRM
+
+
+
+
+                                               28        56
+                         3.2:
+
+       /
+
+                       ToolCall                           13               49
+                                         473                             Shell SSRF               3.2
+
+
+
+
+AgentToolBench                           500                                        secret        3.3
+
+
+
+                                   40                40
+                                                          10     API Key    Token
+    DLP                                          8                                              3.2   3.4
+
+
+
+                                    200        blind
+                                          40
+   Objective                                                                        Agent
+                                    real-agent 40                                                 3.4
+  Evaluation
+                                          external-
+                                         redteam
+
+                                   30                90
+  Semi-real /
+                                                                                                3.4 3.5
+OpenCode E2E           Agent                                    Trace     Adapter
+                                            473
+
+                                   holdout 300
+                                                               payload
+                                   unseen 150                                                     3.5
+                                    bypass 120
+
+
+
+
+  CodeAgent-Guard                         Accuracy
+
+
+                                  3.3                                       Ask          Deny
+                 Strong Block                                                Deny
+
+
+
+
+                                    29           56
+                                           3.3:
+
+
+                 Attack Intervention Strong
+                 Block Complete FN Secret                                         3.2
+                 Exposure Rate SSRF Block Rate
+                 Accuracy FP FN Taint
+                                                                                  3.3
+                 Chain
+                 Task Completion False Positive
+                                                                                  3.4
+                 Normal Disruption Ask Rate
+                         P95             DLP
+                           Trace / Audit                                          3.4
+
+                                   Trace
+                                                                                  3.5
+
+
+
+
+            Tool Proxy                                                 DLP
+                Agent
+                                                      3.2                               3.3
+                                           3.4
+      3.5
+
+3.2
+                              CodeAgent-Guard
+                                                                 AI   Agent
+                                                      SSRF                          secret
+
+
+                                    Deny
+Ask
+              Agent                Shell
+                         [18, 2]                                          Tool Proxy
+                                    Policy Engine CT-TRM DLP          Decision Fusion
+
+
+
+
+                                                 30         56
+3.2.1
+
+                            3.4:
+
+
+
+                                                        Policy Engine DLP                      Deny
+
+                                                        Policy Engine                          Deny
+
+                                                        Policy Engine Decision
+           Shell                                                                             Deny / Ask
+                                                        Fusion
+   SSRF      metadata
+                                                        Policy Engine                          Deny
+
+
+                                                        CT-TRM                               Deny / Ask
+
+
+                                                        CT-TRM DLP                           Deny / Ask
+
+        Secret                                          DLP     Decision Fusion                Deny
+                                 –      –
+                                                        CT-TRM Chain Risk                      Deny
+                            –
+
+
+
+3.2.2
+
+                           473                                    352                 Deny
+CodeAgent-Guard                             344                         97.73%                 2.27%
+                        87.95%                                              0.00%
+OpenCode Adapter                                                  Agent                 Tool Proxy
+                             CT-TRM
+   96.83%        Attack Intervention         98.86%     Strong Block       98.58%       Complete FN
+1.14%                                                                                                     Ask
+   Deny
+
+                                 3.5:
+
+                                                       Accuracy                   /                 /
+
+                                     473               12.47%             0.00%               100.00%
+            benchmark                473               87.95%             97.73%               2.27%
+   Full CT-TRM external
+                                     473               96.83%             98.86%               1.14%
+           fixed
+
+
+
+                                                  31     56
+            DLP                           10    secret 40                        40                       8
+                          40         secret                                            40        secret
+                                         Deny                      Secret Exposure Rate      0.00%
+                          regex-local scanner                   Tool Proxy
+                    TruffleHog                   secret
+
+3.2.3
+
+                                                                       SSRF           metadata
+        Payload                           100.0%                                                 100.0%
+                                                                                       Policy Engine
+                 SSRF          CT-TRM           Source/Taint               DLP
+        Shell                                             96.7%
+
+
+                                                89.5%
+                                                                     URL
+                Shell
+
+
+run_command
+                        run_command                                    61.7%                      97.8%
+            21                                                               Shell
+                                                                       payload
+                                                          Policy Engine
+Shell                                                     CT-TRM       Task Budget
+
+
+                                 Shell                                    DLP
+
+
+
+3.3
+                         CodeAgent-Guard                                     Policy Engine CT-TRM
+DLP      Chain Risk      Decision Fusion
+
+
+
+
+                                                  32       56
+                                                                                  Accuracy FP FN
+
+
+
+
+      AgentToolBench 500                                                Source Taint Task Budget
+Chain Risk                    CT-TRM                              473         benchmark
+                                                      DLP
+
+
+                                                                   SSRF                     CT-TRM
+                                   DLP                               Chain Risk      Task Budget
+
+
+                                             [3, 8]
+
+3.3.1
+
+               CT-TRM                                500        AgentToolBench
+                Shell          Payload
+                     secret        SSRF     metadata
+                                           agent-attack-benchmark/benchmark.jsonl
+473                     352               121                                               59   Allow
+62       Ask     352      Deny
+
+
+
+
+        Baseline A
+                                                                           URL
+                                                      473            benchmark
+                                          -only                           Accuracy    12.47% Attack
+Intervention        Strong Block         0.00%
+        Baseline B                                                                   baseline_rules
+                                                                                     SSRF
+
+
+        Variant C                   CT-TRM                                 CT-TRM
+
+
+
+                                                33         56
+                                    rules_plus_source rules_plus_taint                                    ct_trm_
+without_chain
+                            CT-TRM
+        Variant D                  DLP                                      DLP                 secret
+                                                  taint                              Chain Risk
+                                    DLP                         Variant D          473            benchmark
+Accuracy        85.84% FN                                 39        21 Strong Block                88.92%
+   94.03%
+      Full                           full_ct_trm                                Policy Engine CT-TRM
+DLP Task Budget Chain Risk Approval Transparency Trace                                   Audit Hash Chain
+
+
+
+
+3.3.2
+
+                            3.6: AgentToolBench 500
+
+                                                                            Taint        Chain
+                                     Accuracy          FP         FN                                     P95/ms
+
+         No Guard            500         9.2%          0          390          0            0            0.0003
+     Baseline B
+           +                 500         66.8%         0          132          0            0            0.1163
+        baseline_rules
+     Variant C1         +
+           Source            500         66.8%         6          132          0            0            0.6201
+      rules_plus_source
+     Variant C2         +
+            Taint            500         78.6%         6          83          159           0            0.7546
+       rules_plus_taint
+     Variant C3 CT-TRM
+                             500         85.4%         0          73          159           0            0.8834
+             Chain Risk
+     Full Policy Engine +
+     CT-TRM + DLP + Task
+                             500         98.0%         0          10          159          145           0.9256
+      Budget + Chain Risk
+         full_ct_trm
+
+
+                3.6                                                No Guard                                  9.2%
+FN        390
+Baseline B                     66.8%       FN         390          132
+                URL
+
+
+
+                                                 34        56
+       Variant C1                 Source              Accuracy       66.8%      FN          132          FP
+          6
+              Entity
+       Source                 CT-TRM
+       Variant C2            Taint              Accuracy            78.6%       FN     132         83
+                       159                 CT-TRM
+
+
+URL                   Agent                               Taint
+README                    HTTP                                                  ToolCall
+       Variant C3                                                         CT-TRM
+Chain Risk       Accuracy                        85.4%       FN      73    FP           0               Task
+Budget
+                              taint            CT-TRM
+
+
+       Full                       98.0% Accuracy FN               10 FP     0                           159
+                                        145     P95                   0.9256 ms        Baseline B
+Full                      31.2                  FN         122
+                                   CT-TRM                                              Chain Risk
+                                                              473                                   -only
+                                                                                 DLP          FN    39
+   21            secret
+
+
+
+                          Whitelist-only / Rules / Rules+DLP / Full CT-TRM
+
+                             3.1:
+
+
+          3.1                                                                           3.6
+        500                                                         Taint Task Budget         Chain Risk
+       FN       132          10                 FP            0     473                                 DLP
+                                      secret
+
+
+
+
+                                                     35      56
+3.3.3
+
+                                                                                Agent
+Tool Catalog                               Tool Proxy
+                                     read_file                                          README
+SSH                   run_command                                      pytest           curl | sh
+   send_email                                           token
+
+
+                                                                      Baseline B         No Guard
+                                            Shell SSRF
+
+
+                                     README                                                  Agent
+
+
+
+
+        CT-TRM                                               Source
+                     Entity        Taint           Provenance Graph         Task Budget
+                     Taint    FN     132           83
+                           CT-TRM                       FN       73       FP       0
+                                                         CT-TRM
+                                                   README
+
+
+        DLP                                        Policy Engine        CT-TRM
+                 secret                                                        API Key
+                                                             HTTP
+                                                                DLP        FN      39        21 Strong
+Block       88.92%            94.03% DLP            19       benchmark                  FP          9
+   DLP                                                                    DLP
+
+
+        Chain Risk     Task Budget                                                           Full
+Chain                145
+
+
+
+                                              36        56
+                             .env                            metadata       HTTP POST
+                               Task Budget
+
+
+
+
+     Decision Fusion                                                                                 Al-
+low / Ask / Deny                                  secret                     Deny
+                             Ask                       Task Budget                  Allow
+        CT-TRM      DLP
+
+
+        Transparency Trace      Audit Hash Chain                                  Accuracy FP        FN
+
+
+                       Transparency Trace              Policy Engine CT-TRM DLP Decision
+Fusion                  Audit Hash Chain
+
+
+
+3.3.4
+
+                          Full             Baseline B                                   Baseline B
+                                      132         FN    Full      FN         10
+
+
+             CT-TRM
+
+
+                             Full              500               FP     0
+         Deny                                Source Taint Task Budget                Chain Risk
+
+
+README                                                                      Ask
+
+
+                       Full         P95                      0.9256 ms            Baseline B      0.1163
+ms
+                               I/O Shell
+                                                                                            P95
+
+
+
+                                             37         56
+                                            DLP                 DLP                 Agent E2E
+
+
+
+3.3.5
+
+                                      AgentToolBench 500 CT-TRM                       473
+benchmark                                                                       Accuracy
+           Source Taint     Chain Risk                                             -only
+   +DLP
+
+
+
+3.4
+
+
+
+
+                                                                        Agent
+                                DLP                Transparency Trace     Audit Hash Chain
+                                                               CodeAgent-Guard
+                                                                                            SSH
+            secret        metadata                                                           Deny
+                                                                                     Ask
+                                                                                            Allow
+
+
+[17, 14]                              Ask
+
+
+
+3.4.1
+
+                     ToolCall         Tool Proxy           Decision Fusion         Allow    Ask
+Deny                                                                                         Agent
+                                                           I/O Shell                        DLP
+                                                                          benchmark Semi-real
+Agent
+           3.7                               CT-TRM                                    benchmark
+
+
+
+                                             38       56
+                                     3.7:
+
+
+                                                  24.6482 ms P50
+                                       0.0772 ms P95 0.2414 ms P99
+                                       0.9184 ms(      24.6482 ms
+             benchmark 473                  1    DNS                                       P95/P99
+
+
+                                                               )
+                                                                                     CT-TRM
+    AgentToolBench 500 Full CT-TRM              P95 0.9256 ms
+
+                                        1000     Policy evaluations
+                                            1.3225 ms P95 3.7282 ms
+                                                                                   P99        5 ms
+                                                 P99 4.1801 ms
+                                        90                        policy                 Agent
+             Semi-real Agent           latency 69.097 ms P95 116.3065      Trace
+                                                       ms
+                                        120 cases P95 policy latency
+             Red-team bypass
+                                                 3.2009 ms
+
+
+
+   P95       0.2414 ms        AgentToolBench 500 Full CT-TRM               P95       0.9256 ms
+                  P95     3.7282 ms    P99          4.1801 ms               Policy Engine CT-TRM
+   Decision Fusion                                                     Semi-real Agent               policy
+latency      69.097 ms P95         116.3065 ms
+                         Agent                            Transparency Trace
+
+
+
+
+          Shell
+
+
+
+
+                        DLP
+
+
+
+3.4.2     DLP
+
+     DLP                                                   Policy Engine      CT-TRM
+                                                    DLP
+            send_email.body http_request.body write_file.content
+                                       read_file.content run_command.stdout/stderr
+
+
+
+                                               39         56
+http_request.body          search_files.matches
+   DLP
+                           TruffleHog         secret
+                                             regex-local scanner
+secret                                  Deny                          secret
+     DLP
+               DLP
+
+
+
+                                    3.8: DLP
+
+
+
+                                                                               40    secret
+                                                  HTTP body
+                                                                                           0.0317 ms
+                                                     secret
+                                                                                    P95 0.0510 ms
+                                                                               40   secret
+                                                           stdout/stderr
+                                                                                  Secret Exposure Rate
+                               HTTP                             secret
+                                                                                 0.00%         0.0499
+                                                                                ms P95 0.0870 ms
+
+
+                                                  DLP
+                stdout
+
+
+
+                                     fail-close
+                                                                                               scanner
+
+
+                                                                               40           secret
+                                    secret                    Agent                            DLP
+                                                   Trace                       redaction marker
+
+
+
+
+         3.8      DLP
+                     DLP                     0.1 ms            P95
+                         1MB                            stdout
+                           DLP
+
+
+                           secret                                                      DLP
+
+
+
+
+                                             40          56
+3.4.3     Transparency Trace            Audit Hash Chain
+
+      Transparency Trace          Audit Hash Chain                    ToolCall
+
+
+      SQLite
+          Policy Engine
+
+                       3.9: DLP    Transparency Trace              Audit Hash Chain
+
+                                                                       P95                   P99
+
+           DLP                               0.0317 ms                 0.0510 ms             0.0540 ms
+           DLP                               0.0499 ms                 0.0870 ms             0.1020 ms
+        Audit append     1000                5.6321 ms                 7.0609 ms             8.0157 ms
+      Trace SQLite emit 1000                 5.6515 ms                 6.8967 ms             7.9765 ms
+
+
+          1000                          Audit append           Trace SQLite emit
+5.6321 ms         5.6515 ms       P95           7.1 ms         Audit Hash Chain
+16.4498 ms                valid=true                                          100
+   10            100                ID                         50                            129
+
+
+
+
+3.4.4
+
+      Allow / Ask / Deny
+                           benchmark            /                                             /
+121                     Allow      59               Ask        62                                   48.8%
+                  51.2%                                                 Ask                  benchmark
+
+
+                  Semi-real Agent                         Semi-real Agent               30           90
+                         benign task completion            100.0%       Full CT-TRM benign workflow
+success      100.0% approval flows completed                   6                   90
+          6.7%
+                                                                       Ask
+          3.10                                                                Deny                  Ask
+
+                                               41         56
+                                      3.10:
+
+
+
+
+                                              121           Allow 59
+          benchmark       /
+                                                       Ask 62
+
+                                              30           90
+                                               benign task completion
+             Semi-real Agent                  100.0% Full CT-TRM
+                                              benign workflow success
+                                                       100.0%
+
+                                                6     approval flows
+        Semi-real Agent                                                    6.7%      Ask
+                                                      completed
+
+                                          Blind LLM Real Agent
+                                         E2E External Red-Team
+     Objective Evaluation                        100.0% Accuracy
+                                          Normal disruption / False
+                                             positive     0.0%
+
+
+                 benchmark       Ask
+Semi-real Agent                                                                      Ask
+                                          Objective Evaluation
+                                                                         Blind LLM Test        Normal
+disruption      37.5%          0.0%    Real Agent E2E           False positive    40.0%         0.0%
+             Objective            100.0% Attack Intervention             0.0% Complete FN
+    Ask
+           Ask                                                                                     Ask
+                                               Ask                                 benchmark
+
+
+     Ask                       Task Budget                                                 Ask
+Allow                                                                  Allow             Ask     Deny
+
+
+
+
+                                                           benchmark                      18.18%
+           run_command                                           292                21
+
+
+
+                                                 42      56
+                                                               Ask    Deny
+    run_command                             Shell
+                                                payload
+                 heredoc                                                         Shell
+                               Shell
+                 pytest npm test go test                                     Allow
+                                                                                   Deny
+                                                 Ask
+                                                                Source            Task Budget
+                                           Source
+
+
+                                 CT-TRM           Taint       Provenance Graph
+                                  benign README
+
+
+                                          DLP
+                                        secret
+
+
+                                                                                 DLP
+
+
+                        CodeAgent-Guard
+                                                  CT-TRM
+          P99           5 ms Semi-real Agent
+                      Semi-real Agent                         Full CT-TRM benign workflow
+success      100.0%                                       Objective Evaluation
+            Real Agent false positive             0.0%                                   100.0%
+Attack Intervention     0.0% Complete FN
+                                                  DLP
+                                                                 benchmark       run_command
+
+
+                                           43       56
+              Shell
+                                                     Agent
+
+
+         CodeAgent-Guard                                 Ask
+
+
+
+3.5
+
+3.5.1
+
+
+
+
+                                                                         mock/sandbox
+                        Agent
+                                                 Agent Tool Call Attack Benchmark
+        473            ToolCall           Allow / Ask / Deny            CT-TRM
+                                                 Objective Evaluation        Agent
+               Agent
+                           [18, 5]
+
+
+
+
+                                     44     56
+                                         3.11:
+
+
+                                                   Accuracy 87.95%
+                                                               97.73%                         13      49
+         Agent                     473
+                                                          2.27%
+                                                            18.18%
+                                                      Accuracy 96.83%
+                                                     Attack Intervention             CT-TRM
+        benchmark Full                             98.86% Strong Block
+                                   473
+     CT-TRM external test                          98.58% Complete FN                              Ask     Deny
+                                                       1.14% Normal
+                                                      Disruption 6.78%
+                                                   Full CT-TRM Accuracy
+                                                   98.0% FN         baseline           Source Taint Task
+   AgentToolBench 500              500              rules 132          10       Budget Chain Risk
+                                                      Taint       159
+                                                      Chain        145
+                                                                    Attack
+                             300 dev 473
+                                                      Intervention
+                              fixed 300
+                                                       98.86%–100.0%            holdout    unseen red-team
+                             holdout 150
+                                                       Complete FN
+                                redteam
+                                                         0.0%–1.14%
+                                                           Accuracy
+                                                       100.0% Attack
+                             200 blind 40
+                                                      Intervention
+                             real-agent 40
+  Objective Evaluation                             100.0% Complete FN
+                                external-
+                                                           0.0% Normal
+                                 redteam
+                                                     Disruption / FP
+                                                             0.0%
+                                                   Benign task completion
+                                                   100.0% Full CT-TRM
+                                                       benign workflow                        Agent
+                              30           90
+         Semi-real Agent                           success 100.0%
+                                                                      32              Trace
+                                                            6      Trace 60
+
+                                                   Blocked 110 Asked 6
+                                                       Missed 0 False
+         Red-team bypass           120
+                                                   positives 0 P95 policy                                  Ask
+                                                      latency 3.2009 ms
+                                                   Policy       1.3225 ms
+                             1000
+                                                    P95 3.7282 ms P99
+                                    100
+                                                   4.1801 ms         ID
+                                                         Audit valid=True
+
+
+
+         3.11                                                                  benchmark
+0.00%                          97.73%                   Tool Proxy             Policy Engine
+                               AgentToolBench 500                     Full CT-TRM                  baseline rules
+  Accuracy            31.2                         FN       132           10              Source Taint Task
+Budget      Chain Risk                                         DLP
+                                                 Objective Evaluation            Semi-real Agent
+
+
+
+                                                  45      56
+   Transparency Trace        Audit Hash Chain
+                                      holdout_generated       redteam_unseen          Attack In-
+tervention       100.0% Complete FN             0.0% Red-team bypass       120              110
+        Blocked 6            Asked Missed       0
+
+
+
+
+3.5.2
+
+
+
+             Agent        ToolCall                             Trace / Audit
+                                                    secret          SSRF            metadata
+
+
+                 README               SSH                           README
+                     Agent           read_file("~/.ssh/id_rsa") Policy Engine
+                                  CT-TRM        README                     Source
+        Entity        Source → Entity → Tool Argument         Provenance            Task Budget
+                                            Decision Fusion      Deny Tool Executor
+            Transparency Trace                                                      Audit Hash
+Chain
+
+
+
+
+                                          46        56
+                        3.2:          README             SSH
+
+
+               .env                                  read_file(.env)
+Agent            secret        http_request.body         send_email.body Policy Engine
+                                                         DLP                        API Key
+Token                   Chain Risk                   →                      secret exfiltration
+      Decision Fusion          Deny        secret                    Transparency Trace
+DLP                                                      Audit Hash Chain
+                DLP       Chain Risk
+
+
+
+
+                               3.3:      .env
+
+
+                 metadata                                  README Issue              HTTP
+                                                             Agent                  metadata
+localhost                                http_request Tool Proxy            URL IP
+
+                                            47      56
+                      Policy Engine           SSRF     metadata          CT-TRM
+Chain Risk              metadata          →                       Decision Fusion
+                                   Deny                GET      Allow         Ask     secret
+DLP             Trace    Audit                                                             benchmark
+   39                                                  SSRF           metadata
+
+
+
+
+                        3.4:          metadata                        SSRF
+
+
+3.5.3
+
+                                                                  CodeAgent-Guard
+
+
+
+
+                DLP                                          secret
+                                               DLP                                                    DLP
+                                      fail-close
+
+
+                                                             benchmark         run_command
+        Shell                                                 Agent                  Ask       Deny
+
+
+
+
+                           Tool Proxy
+                                                                  CodeAgent-Guard
+
+
+                                                     redteam_unseen          Red-team bypass
+
+                                                48      56
+                                                                       package lifecycle
+script               DLP                    secret                    Agent
+
+
+
+
+            AI      Agent                              secret      SSRF
+                            benchmark                                 Agent
+CT-TRM                                                                    Agent
+                                    Objective Evaluation    Semi-real Agent
+
+
+
+
+                                                                                  Policy
+Engine                     CT-TRM                                   DLP
+           Chain Risk                           Decision Fusion                   Trans-
+parency Trace    Audit Hash Chain
+
+
+                                                                              Agent
+                                             DLP
+run_command
+
+
+
+
+                                       49      56
+             AI
+
+
+    CodeAgent-Guard                                                         Agent
+
+
+
+
+    1        AI
+        AI               Agent
+  Shell
+                                                                        README
+
+
+                             Tool Proxy                Agent
+                                                  HTTP
+
+
+                                                                 metadata       secret
+
+
+    2
+
+
+          Agent
+                                                         Policy Engine CT-TRM       DLP
+                             Policy Engine                           SSRF
+                CT-TRM         Source Entity Taint Provenance Graph Task Budget
+Chain Risk        README              HTTP
+          DLP                 API Key     Token
+
+
+                                                                                     secret
+                  metadata
+    3
+
+
+
+
+                                             50   56
+            AI
+
+
+                                             Allow
+metadata            secret                        Deny
+                                                                      Ask        Ask
+                                                           Policy      CT-TRM
+      DLP                                                                    Agent
+                                          Ask
+
+
+
+
+ 4               Trace
+ AI
+                 Allow   Deny
+                                         Transparency Trace
+                                                         Policy        CT-TRM
+     DLP                                                               SHA-256
+
+
+
+
+                  CodeAgent-Guard
+                                                                    Trace
+                    AI
+                                          SSRF
+            AI
+
+
+
+
+                                    51       56
+          AI
+
+
+
+
+                 CodeAgent-Guard
+                                      1                                               Agent
+      Shell HTTP                                                      2
+                             Policy Engine CT-TRM               DLP
+                                            3
+                                                                                  4
+  Trace
+        473     Agent                             87.95%                     97.73%
+          500    AgentToolBench                        Full CT-TRM        baseline rules
+        31.2%                     132             10                  159
+145
+
+
+
+
+                                  1
+                                                                2    DLP
+                                                                      3
+OpenCode                AI        Agent                                   MCP
+  IDE                                   4
+
+
+                CodeAgent-Guard             AI
+
+
+                                            DLP                       Agent
+                                            AI
+
+
+
+
+                                            52     56
+ [1] OWASP Foundation. OWASP Top 10 for Large Language Model Applications, 2025.
+ [2] OWASP GenAI Security Project. LLM06:2025 Excessive Agency, 2025.
+ [3] Yao S., Zhao J., Yu D., et al. ReAct: Synergizing Reasoning and Acting in Language
+     Models. arXiv:2210.03629, 2022.
+ [4] Schick T., Dwivedi-Yu J., Dessì R., et al. Toolformer: Language Models Can Teach
+     Themselves to Use Tools. arXiv:2302.04761, 2023.
+ [5] Greshake K., Abdelnabi S., Mishra S., et al. Not what you ve signed up for: Com-
+     promising Real-World LLM-Integrated Applications with Indirect Prompt Injection.
+     arXiv:2302.12173, 2023.
+ [6] Debenedetti E., Zhang J., Balunović M., et al. AgentDojo: A Dynamic Environment
+     to Evaluate Prompt Injection Attacks and Defenses for LLM Agents. NeurIPS Datasets
+     and Benchmarks, 2024.
+ [7] Zhang H., Huang J., Mei K., et al. Agent Security Bench (ASB): Formalizing and
+     Benchmarking Attacks and Defenses in LLM-based Agents. arXiv:2410.02644, 2024.
+ [8] Model Context Protocol. Specification, 2025.
+ [9] Model Context Protocol. Tools Specification, 2025.
+[10] OpenCode. Tools Documentation, 2026.
+[11] OpenCode. Permissions Documentation, 2026.
+[12] National Institute of Standards and Technology. Artificial Intelligence Risk Manage-
+     ment Framework: Generative Artificial Intelligence Profile (NIST AI 600-1), 2024.
+[13] National Institute of Standards and Technology. Secure Software Development Frame-
+     work (SSDF) Version 1.1: NIST SP 800-218, 2022.
+[14] Microsoft. Protecting against indirect prompt injection attacks in MCP, 2025.
+[15] Schulhoff S., Pinto J., Khan A., et al. Ignore This Title and HackAPrompt: Exposing
+     Systemic Vulnerabilities of LLMs through a Global Scale Prompt Hacking Competi-
+     tion. arXiv:2311.16119, 2023.
+[16] Alizadeh M., Samei Z., Stetsenko D., Gilardi F. Simple Prompt Injection At-
+     tacks Can Leak Personal Data Observed by LLM Agents During Task Execution.
+
+
+                                         53     56
+    arXiv:2506.01055, 2025.
+
+
+
+
+[1] Scott A. Crosby and Dan S. Wallach. Efficient data structures for Tamper-Evident log-
+    ging. In Proceedings of the 18th USENIX Security Symposium. USENIX Association,
+    2009.
+
+[2] Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fis-
+    cher, and Florian Tramèr. AgentDojo: A dynamic environment to evaluate prompt
+    injection attacks and defenses for LLM agents. In Advances in Neural Information
+    Processing Systems, 2024.
+
+[3] William Enck, Peter Gilbert, Byung-Gon Chun, Landon P. Cox, Jaeyeon Jung, Patrick
+    McDaniel, and Anmol N. Sheth. TaintDroid: An Information-Flow tracking system for
+    realtime privacy monitoring on smartphones. In Proceedings of the 9th USENIX Sym-
+    posium on Operating Systems Design and Implementation, pages 393–407. USENIX
+    Association, 2010.
+
+[4] Samuel T. King and Peter M. Chen. Backtracking intrusions. In Proceedings of the
+    19th ACM Symposium on Operating Systems Principles, pages 223–236. Association
+    for Computing Machinery, 2003.
+
+[5] Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu,
+    Hangliang Ding, Kaiwen Men, Kejuan Yang, Shudan Zhang, Xiang Deng, Aohan Zeng,
+    Zhengxiao Du, Chenhui Zhang, Sheng Shen, Tianjun Zhang, Yu Su, Huan Sun, Min-
+    lie Huang, Yuxiao Dong, and Jie Tang. AgentBench: Evaluating LLMs as agents. In
+    Proceedings of the 12th International Conference on Learning Representations (ICLR
+    2024). OpenReview.net, 2024.
+
+[6] Yupei Liu, Yuqi Jia, Runpeng Geng, Jinyuan Jia, and Neil Zhenqiang Gong. Formaliz-
+    ing and benchmarking prompt injection attacks and defenses. In 33rd USENIX Security
+    Symposium, pages 1831–1847. USENIX Association, 2024.
+
+
+
+                                       54     56
+ [7] Michael Meli, Matthew R. McNiece, and Bradley Reaves. How bad can it git? charac-
+     terizing secret leakage in public github repositories. In Network and Distributed System
+     Security Symposium, 2019.
+
+ [8] Sadegh M. Milajerdi, Rigel Gjomemo, Birhanu Eshete, R. Sekar, and V. N. Venkatakr-
+     ishnan. HOLMES: Real-time APT detection through correlation of suspicious infor-
+     mation flows. In Proceedings of the 2019 IEEE Symposium on Security and Privacy,
+     pages 1137–1152. IEEE, 2019.
+
+ [9] National Institute of Standards and Technology. Artificial intelligence risk manage-
+     ment framework (AI RMF 1.0). Technical Report NIST AI 100-1, National Institute of
+     Standards and Technology, 2023.
+
+[10] OWASP GenAI Security Project. OWASP Top 10 for Agentic Applications for 2026,
+     December 2025.
+
+[11] OWASP GenAI Security Project. OWASP Top 10 for Large Language Model Applica-
+     tions 2025, 2025.
+
+[12] Abhijit RoyChowdhury, Maanak Gupta, and Mohit Tiwari. ConfusedPilot: Confused
+     deputy risks in RAG-based LLMs. arXiv preprint arXiv:2408.04870, 2024.
+
+[13] Yangjun Ruan, Honghua Dong, Andrew Wang, Silviu Pitis, Yongchao Zhou, Jimmy
+     Ba, Yann Dubois, Chris J. Maddison, and Tatsunori Hashimoto. Identifying the risks
+     of LM agents with an LM-emulated sandbox. In International Conference on Learning
+     Representations, 2024.
+
+[14] Stuart E. Schechter, Rachna Dhamija, Andy Ozment, and Ian Fischer. The emperor’s
+     new security indicators. In Proceedings of the 2007 IEEE Symposium on Security and
+     Privacy, pages 51–65. IEEE Computer Society, 2007.
+
+[15] Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Eric
+     Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Lan-
+     guage models can teach themselves to use tools. In Advances in Neural Information
+     Processing Systems, 2023.
+
+                                         55     56
+[16] Stack Overflow. 2025 developer survey: AI, 2025.
+
+[17] Alma Whitten and J. D. Tygar. Why johnny can’t encrypt: A usability evaluation of
+     PGP 5.0. In Proceedings of the 8th USENIX Security Symposium. USENIX Association,
+     1999.
+
+[18] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and
+     Yuan Cao. ReAct: Synergizing reasoning and acting in language models. In Interna-
+     tional Conference on Learning Representations, 2023.
+
+[19] Maxwell Zeff. GitHub Copilot crosses 20m all-time users. TechCrunch, July 2025.
+
+
+
+
+                                       56     56
+

@@ -1,0 +1,3 @@
+feature:
+  approval_mode: once
+  review_required: true

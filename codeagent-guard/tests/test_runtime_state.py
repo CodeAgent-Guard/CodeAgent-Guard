@@ -164,14 +164,32 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertIn("chain_risk", decision.reasons)
 
     def test_opencode_plugin_waits_for_dashboard_approval(self) -> None:
-        plugin = (
-            Path(__file__).parents[1]
-            / "opencode"
-            / "tool-proxy-plugin.js"
-        ).read_text(encoding="utf-8")
-        self.assertIn("waitForApproval", plugin)
-        self.assertIn("/api/approvals/", plugin)
-        self.assertIn('result.action === "ask"', plugin)
+        root = Path(__file__).parents[1]
+        plugin_paths = [
+            root / "opencode" / "tool-proxy-plugin.js",
+            root / ".opencode" / "plugins" / "codeagent-guard.js",
+        ]
+        for plugin_path in plugin_paths:
+            with self.subTest(plugin=plugin_path):
+                plugin = plugin_path.read_text(encoding="utf-8")
+                self.assertIn("waitForApproval", plugin)
+                self.assertIn("/api/approvals/", plugin)
+                self.assertIn('result.action === "ask"', plugin)
+                self.assertIn('"chat.message"', plugin)
+                self.assertIn('"tool.execute.after"', plugin)
+                self.assertIn("/api/opencode/tool-result", plugin)
+                self.assertIn("sessionPrompts", plugin)
+                self.assertIn("sessionScenarios", plugin)
+                self.assertIn("sessionTraceIds", plugin)
+                self.assertIn("sessionMessageIds", plugin)
+                self.assertIn("stablePromptId", plugin)
+                self.assertIn("traceIdForSession", plugin)
+                self.assertIn("videoScenarioFromPrompt", plugin)
+                self.assertIn("video_scenario", plugin)
+                self.assertIn("toolCallArgs", plugin)
+                self.assertIn("promptTextFromMessage", plugin)
+                self.assertIn("error.retryable === false", plugin)
+                self.assertIn("${messageID}", plugin)
 
 
 if __name__ == "__main__":

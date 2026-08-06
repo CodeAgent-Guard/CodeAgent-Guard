@@ -251,6 +251,12 @@ def tool_alignment(
     tool_name: str,
     args: dict,
 ) -> tuple[int, str]:
+    if (
+        budget.max_side_effect == SideEffectLevel.READ_ONLY
+        and tool_name == "run_command"
+        and _command_is_read_only(str(args.get("cmd") or args.get("command") or ""))
+    ):
+        return -15, "read_only_shell_inspection"
     if tool_name in budget.likely_tools:
         if _explicit_argument_match(budget, tool_name, args):
             return -25, "explicitly_requested_low_risk_capability"
@@ -279,6 +285,52 @@ def _explicit_argument_match(
 
 def _contains(text: str, values: tuple[str, ...]) -> bool:
     return any(value in text for value in values)
+
+
+def _command_is_read_only(command: str) -> bool:
+    value = str(command or "").strip()
+    value = re.sub(r"\s+2>\s*/dev/null\b|\s+2>&1\b", "", value)
+    if not value:
+        return False
+    if re.search(r">|<|`|\$\(", value):
+        return False
+    parts = [
+        part.strip()
+        for part in re.split(r"\s*(?:&&|;|\|)\s*", value)
+        if part.strip()
+    ]
+    return bool(parts) and all(_single_command_is_read_only(part) for part in parts)
+
+
+def _single_command_is_read_only(command: str) -> bool:
+    value = str(command or "").strip()
+    value = re.sub(r"\s+2>\s*/dev/null\b|\s+2>&1\b", "", value)
+    if not value:
+        return False
+    if re.search(
+        r"(?i)(?:\b(?:curl|wget|bash|sh|python|node|npm|pnpm|yarn|rm|mv|cp|"
+        r"chmod|chown|mkdir|touch|tee|xargs)\b|-exec\b|-delete\b)",
+        value,
+    ):
+        return False
+    path = r"[\w./~*{}-]+"
+    patterns = (
+        r"pwd",
+        rf"ls(?:\s+-[A-Za-z0-9]+)*(?:\s+{path})?",
+        rf"cat\s+{path}(?:\s+{path})*",
+        rf"head(?:\s+-n\s+\d+)?\s+{path}",
+        rf"tail(?:\s+-n\s+\d+)?\s+{path}",
+        rf"sed\s+-n\s+'?[\d,$]+p'?\s+{path}",
+        rf"wc\s+-l\s+{path}",
+        rf"find\s+{path}(?:\s+-maxdepth\s+\d+)?"
+        rf"(?:\s+-type\s+[fd])?(?:\s+-name\s+['\"]?[\w.*-]+['\"]?)?",
+        r"grep\s+(?:-[A-Za-z]+\s+)?[^;&|`<>]+",
+        r"rg\s+(?:-[A-Za-z0-9]+\s+)?[^;&|`<>]+",
+        r"git\s+(?:status|log(?:\s+--oneline)?|diff\s+--stat)",
+        r"which\s+[\w.-]+",
+        r"command\s+-v\s+[\w.-]+",
+    )
+    return any(re.fullmatch(pattern, value, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def _redact_task(task: str) -> str:

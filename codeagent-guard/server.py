@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import mimetypes
 import os
 import subprocess
 import threading
+import time
 import traceback
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +56,70 @@ EXTERNAL_WRITE_ROOTS = _env_paths("GUARD_EXTERNAL_WRITE_ROOTS")
 BUILD = "2026.06.23-agenttoolbench-v4"
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 DATA.mkdir(parents=True, exist_ok=True)
+
+_INSTANCE_LOCK_TOKEN = ""
+_INSTANCE_LOCK_STOP = threading.Event()
+
+
+def _release_instance_lock(lock_path: Path) -> None:
+    try:
+        if lock_path.read_text(encoding="utf-8").strip() == _INSTANCE_LOCK_TOKEN:
+            lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _acquire_instance_lock(lock_path: Path, stale_after: float = 15.0) -> None:
+    """Prevent Windows and WSL servers from sharing the same SQLite files."""
+    global _INSTANCE_LOCK_TOKEN
+    token = f"{os.getpid()}:{uuid.uuid4().hex}"
+    for _ in range(3):
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age < stale_after:
+                raise RuntimeError(
+                    "CodeAgent Guard is already running for this data directory"
+                )
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(token)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _INSTANCE_LOCK_TOKEN = token
+        break
+    else:
+        raise RuntimeError("Unable to acquire the CodeAgent Guard instance lock")
+
+    def heartbeat() -> None:
+        while not _INSTANCE_LOCK_STOP.wait(2.0):
+            try:
+                if lock_path.read_text(encoding="utf-8").strip() != token:
+                    return
+                os.utime(lock_path, None)
+            except OSError:
+                return
+
+    threading.Thread(target=heartbeat, daemon=True).start()
+    atexit.register(_release_instance_lock, lock_path)
+
+
+if __name__ == "__main__":
+    try:
+        _acquire_instance_lock(DATA / "server.instance.lock")
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from None
 
 trusted_workspaces = TrustedWorkspaceStore(DATA / "trusted_workspaces.json")
 runtime_state = RuntimeStateStore(DATA / "state.db")
@@ -316,10 +383,28 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/tools/execute":
                 if not isinstance(body.get("allowed_tools"), list):
                     raise ValueError("allowed_tools 必须由当前任务显式声明")
+                trace_id = str(
+                    body.get("trace_id") or f"trace-{uuid.uuid4().hex[:12]}"
+                )
+                source_content = body.get("source_content")
+                if source_content:
+                    policy.register_context(
+                        str(source_content),
+                        str(body.get("source", "user")),
+                        str(
+                            body.get("source_origin")
+                            or body.get("source")
+                            or "source_content"
+                        ),
+                        trace_id=trace_id,
+                        tool_call_id=body.get("call_id"),
+                        conversation_id=body.get("conversation_id"),
+                        metadata={"one_shot_source": True},
+                    )
                 result = proxy.execute(
                     str(body.get("tool", "")),
                     body.get("args") or {},
-                    trace_id=body.get("trace_id"),
+                    trace_id=trace_id,
                     task=str(body.get("task", "手动工具调用")),
                     source=str(body.get("source", "user")),
                     tainted=bool(body.get("tainted", False)),
@@ -351,6 +436,29 @@ class Handler(BaseHTTPRequestHandler):
                     tainted=bool(body.get("tainted", False)),
                     call_id=body.get("call_id"),
                     allowed_tools=allowed_tools,
+                    metadata={
+                        **(body.get("metadata") or {}),
+                        "session_id": body.get("session_id"),
+                    },
+                )
+                self._json(result)
+            elif parsed.path == "/api/opencode/tool-result":
+                tool = str(body.get("tool", "")).strip()
+                if not tool:
+                    raise ValueError("tool must not be empty")
+                args = body.get("args") or {}
+                if not isinstance(args, dict):
+                    raise ValueError("args must be an object")
+                result = opencode_adapter.record_tool_result(
+                    trace_id=str(
+                        body.get("trace_id")
+                        or f"opencode-{body.get('session_id', 'session')}"
+                    ),
+                    task=str(body.get("task", "OpenCode tool call")),
+                    tool=tool,
+                    args=args,
+                    result=body.get("result"),
+                    call_id=body.get("call_id"),
                     metadata={
                         **(body.get("metadata") or {}),
                         "session_id": body.get("session_id"),

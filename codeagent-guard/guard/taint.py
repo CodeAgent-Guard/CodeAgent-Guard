@@ -1106,6 +1106,7 @@ class TaintTracker:
     @staticmethod
     def command_is_read_only(command: str) -> bool:
         value = re.sub(r"\s+", " ", str(command).strip())
+        value = re.sub(r"\s+2>\s*/dev/null\b|\s+2>&1\b", "", value)
         patterns = (
             r"pwd",
             r"(?:python(?:3)?|node|ruby|perl|php)\s+--version",
@@ -1114,10 +1115,15 @@ class TaintTracker:
             r"printf\s+[^|;&`$<>]+",
             r"grep\b(?!.*(?:api[_-]?key|token|secret|password|credential))"
             r".*(?:\$\{?workspace\}?|workspace[/\\]|(?:^|\s)\.).*",
+            r"rg\b(?!.*(?:api[_-]?key|token|secret|password|credential))"
+            r"[^;&|`<>]+",
             r"(?:ls|dir)\b(?!.*(?:>|--delete)).*",
+            r"cat\b(?!.*(?:api[_-]?key|token|secret|password|credential))"
+            r"[^;&|`<>]+",
+            r"(?:head|tail)(?:\s+-n\s+\d+)?\s+[^;&|`<>]+",
+            r"sed\s+-n\s+'?[\d,$]+p'?\s+[^;&|`<>]+",
             r"wc\b.*",
-            r"find\s+(?:\.|workspace(?:[/\\]|\s)).*"
-            r"(?<!\s-delete)(?<!\s-exec)",
+            r"find\b(?!.*(?:\s-delete\b|\s-exec\b|[<>])).+",
             r"(?:env|printenv)(?:\s*\|\s*grep\s+"
             r"[A-Za-z_][A-Za-z0-9_]*)?",
             r"(?:ps|netstat|ss|lsof|mount|df|du|uname|whoami|id)\b.*",
@@ -1134,6 +1140,14 @@ class TaintTracker:
         return any(
             re.fullmatch(pattern, value, flags=re.IGNORECASE)
             for pattern in patterns
+        ) or (
+            not re.search(r">|<|`|\$\(", value)
+            and len(parts := [
+                part.strip()
+                for part in re.split(r"\s*(?:&&|;|\|)\s*", value)
+                if part.strip()
+            ]) > 1
+            and all(TaintTracker.command_is_read_only(part) for part in parts)
         )
 
     @classmethod

@@ -36,6 +36,7 @@ data/*.pid
 data/edge-*/
 data/evaluation/*_result.json
 workspace/
+.demo_fake_home/
 
 # Logs and temporary files
 *.log
