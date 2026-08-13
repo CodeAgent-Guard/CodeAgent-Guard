@@ -36,7 +36,6 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">AGENT TOOL-CALL BOUNDARY CONTROL</p>
           <h1 id="page-title">系统总览</h1>
         </div>
         <div class="header-actions">
@@ -56,7 +55,6 @@
             <div class="hero-overlay"></div>
           </div>
           <div class="hero-content">
-            <p class="eyebrow">CODEAGENT GUARD</p>
             <h2>Agent 工具调用边界控制与风险审计</h2>
             <p class="hero-copy">
               统一接管 Agent / OpenCode 的工具调用，结合 Policy Engine、CT-TRM 风险分析、审批闭环与
@@ -108,7 +106,7 @@
 
         <article class="panel flow-panel">
           <div class="panel-head">
-            <div><p>SYSTEM FLOW</p><h2>风险证据融合与授权决策链路</h2></div>
+            <div><h2>风险证据融合与授权决策链路</h2></div>
           </div>
           <div class="flow report-aligned-flow" id="control-flow">
             <div class="flow-node active"><span>01</span><i>TC</i><b>ToolCall</b><small>tool + args</small></div>
@@ -135,10 +133,9 @@
         </article>
 
         <article class="panel preflight-review-panel">
-          <div class="panel-head">
-            <div>
-              <p>PRE-EXECUTION REVIEW</p>
-              <h2>执行前工具调用审查链路</h2>
+            <div class="panel-head">
+              <div>
+                <h2>执行前工具调用审查链路</h2>
               <small class="review-subtitle">每个模块输出结构化证据，Decision Fusion 根据证据强度输出 Allow / Ask / Deny。</small>
             </div>
             <span class="shot-status">ALLOW / ASK / DENY</span>
@@ -242,7 +239,7 @@
         <div class="dashboard-status-grid">
             <article class="panel approvals-panel">
               <div class="panel-head">
-                <div><p>APPROVAL CENTER</p><h2>待审批事务</h2></div>
+                <div><h2>待审批事务</h2></div>
                 <span class="tag approval-count" id="approval-count">0</span>
               </div>
               <div id="pending-approvals" class="pending-approvals empty-state">
@@ -252,7 +249,7 @@
 
             <article class="panel risk-panel">
               <div class="panel-head">
-                <div><p>RISK DISTRIBUTION</p><h2>风险模式统计</h2></div>
+                <div><h2>风险模式统计</h2></div>
               </div>
               <div class="risk-content">
                 <div class="donut" id="risk-donut"><div><strong id="risk-total">0</strong><span>EVENTS</span></div></div>
@@ -263,7 +260,7 @@
 
             <article class="panel audit-health-panel">
               <div class="panel-head">
-                <div><p>AUDIT HEALTH</p><h2>审计链与恢复能力</h2></div>
+                <div><h2>审计链与恢复能力</h2></div>
                 <span class="tag" id="home-audit-status">VALID</span>
               </div>
               <div class="chain-visual" aria-label="Audit Hash Chain 状态">
@@ -286,7 +283,7 @@
         <div class="agent-layout">
           <article class="panel model-panel">
             <div class="panel-head">
-              <div><p>MODEL PROVIDER</p><h2>大模型接入配置</h2></div>
+              <div><h2>大模型接入配置</h2></div>
               <span class="tag" id="provider-status">演示模式</span>
             </div>
             <div class="model-form">
@@ -304,7 +301,7 @@
 
           <article class="panel workspace-panel">
             <div class="panel-head">
-              <div><p>TRUSTED WORKSPACES</p><h2>可信工作环境</h2></div>
+              <div><h2>可信工作环境</h2></div>
               <span class="tag" id="trusted-workspace-count">0</span>
             </div>
             <div class="trusted-workspace-control">
@@ -322,7 +319,7 @@
 
           <article class="panel history-panel">
             <div class="panel-head">
-              <div><p>AGENT SESSIONS</p><h2>上下文与旧对话</h2></div>
+              <div><h2>上下文与旧对话</h2></div>
               <span class="tag" id="history-count">0</span>
               <button class="side-toggle" data-toggle-side="history">收起</button>
             </div>
@@ -336,7 +333,7 @@
 
           <article class="panel console-panel">
             <div class="panel-head">
-              <div><p>CONTROLLED AGENT RUN</p><h2>Agent 任务控制台</h2></div>
+              <div><h2>Agent 任务控制台</h2></div>
               <button class="secondary" id="new-agent-context">新建上下文</button>
             </div>
             <div class="context-panel" id="context-panel">
@@ -368,7 +365,7 @@
             </div>
             <div class="console-actions">
               <small>结果将展示 Agent 规划、策略判定、CT-TRM、工具行动、审计记录和最终回答</small>
-              <button class="primary" id="run-agent">运行 Agent <span>→</span></button>
+              <button class="primary" id="run-agent">运行 Agent</button>
             </div>
             <div id="agent-output" class="agent-output">
               <span class="output-placeholder">等待任务输入。执行后将展示完整透明链路。</span>
@@ -377,7 +374,7 @@
 
           <article class="panel demo-panel">
             <div class="panel-head">
-              <div><p>FUNCTIONAL TEST SUITE</p><h2>功能测试任务集</h2></div>
+              <div><h2>功能测试任务集</h2></div>
               <button class="side-toggle" data-toggle-side="demo">收起</button>
             </div>
             <div class="one-shot-block">
@@ -395,7 +392,7 @@
       <section id="audit" class="view">
         <article class="panel audit-panel">
           <div class="panel-head">
-            <div><p>TAMPER-EVIDENT LOG</p><h2>审计事件与 Hash Chain</h2></div>
+            <div><h2>审计事件与 Hash Chain</h2></div>
             <div class="audit-actions">
               <button class="secondary" id="verify-chain">校验哈希链</button>
               <button class="secondary" id="tamper-test">运行篡改实验</button>
@@ -428,15 +425,15 @@
       <section id="policies" class="view">
         <div class="policy-layout">
           <article class="panel">
-            <div class="panel-head"><div><p>POLICY ENGINE</p><h2>生效策略</h2></div><span id="tool-count" class="chain-ok">TOOLS</span></div>
+            <div class="panel-head"><div><h2>生效策略</h2></div><span id="tool-count" class="chain-ok">TOOLS</span></div>
             <div id="policy-list" class="policy-list"></div>
           </article>
           <article class="panel policy-explain">
-            <p>DECISION MODEL</p><h2>三级处置动作</h2>
+            <h2>三级处置动作</h2>
             <div class="decision-card allow"><b>ALLOW</b><span>调用满足任务授权、资源边界和参数安全要求，允许执行。</span></div>
             <div class="decision-card ask"><b>ASK</b><span>操作具有副作用或访问外部资源，需要用户显式确认。</span></div>
             <div class="decision-card deny"><b>DENY</b><span>命中敏感资源、危险命令、密钥外传或不可信上下文，立即阻断。</span></div>
-            <div class="tool-catalog"><p>TOOL CATALOG</p><div id="tool-catalog"></div></div>
+            <div class="tool-catalog"><div id="tool-catalog"></div></div>
           </article>
         </div>
       </section>
@@ -447,7 +444,6 @@
     <div class="modal-backdrop"></div>
     <article class="modal-card">
       <button class="modal-close" aria-label="关闭">×</button>
-      <p class="eyebrow">AUDIT EVENT DETAIL</p>
       <h2 id="detail-title">事件详情</h2>
       <div id="detail-content"></div>
     </article>

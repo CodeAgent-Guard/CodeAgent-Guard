@@ -2041,7 +2041,7 @@ async function runAgent() {
   const prompt = $("#agent-prompt").value.trim();
   if (!prompt) return toast("请输入 Agent 任务");
   const button = $("#run-agent");
-  button.disabled = true; button.firstChild.textContent = "运行中 ";
+  button.disabled = true; button.textContent = "运行中";
   $("#agent-output").classList.remove("one-shot-result", "capture-fullscreen");
   $("#agent-output").innerHTML = `<span class="output-placeholder">LLM 正在规划并调用受控工具…</span>`;
   try {
@@ -2076,7 +2076,7 @@ async function runAgent() {
     await loadAgentConversation(result.conversation?.conversation_id || state.agentContextId, result);
   } catch (error) {
     $("#agent-output").innerHTML = `<div class="answer" style="color:var(--red)">${esc(error.message)}</div>`;
-  } finally { button.disabled = false; button.firstChild.textContent = "运行 Agent "; }
+  } finally { button.disabled = false; button.textContent = "运行 Agent"; }
 }
 
 function renderAgentExecution(result) {
