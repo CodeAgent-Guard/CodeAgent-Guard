@@ -32,6 +32,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 button:disabled { cursor: not-allowed; opacity: .52; }
 code, pre { font-family: var(--mono); }
 code { overflow-wrap: anywhere; }
+.path-presentation { min-width: 0; max-width: 100%; display: flex; flex-direction: column; align-items: flex-start; }
+.path-presentation > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path-presentation > code,
+#semantic-object code,
+.semantic-object-value code,
+.question-card code {
+  min-width: 0; max-width: 100%; display: block; overflow: hidden; text-overflow: ellipsis;
+  overflow-wrap: normal; word-break: normal; white-space: nowrap;
+}
+.path-presentation > code, #semantic-object code, .semantic-object-value code { margin-top: 2px; color: var(--primary); }
 .technical-ref { display: inline-flex !important; align-items: center; gap: 5px; min-width: 0; }
 .technical-ref code { color: var(--primary); font-size: 10px; white-space: nowrap; }
 .copy-button { min-height: 24px; padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--primary); cursor: pointer; font-size: 9px; font-weight: 700; }
@@ -181,7 +191,7 @@ main { grid-column: 2; min-width: 0; padding: 0 24px 28px; }
 .task-summary.empty-state { min-height: 96px; display: grid; place-items: center; text-align: center; }
 .task-summary small, .task-summary b, .task-summary > code { display: block; }
 .task-summary small { color: var(--quiet); font-size: 9px; }
-.task-summary b { margin-top: 4px; font-size: 12px; }
+.task-summary b { margin-top: 4px; display: -webkit-box; overflow: hidden; font-size: 12px; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .task-summary code { margin-top: 7px; color: var(--primary); font-size: 10px; }
 .task-summary .technical-ref { margin-top: 7px; }
 .task-summary > .raw-details { margin-top: 7px; }
@@ -223,6 +233,7 @@ main { grid-column: 2; min-width: 0; padding: 0 24px 28px; }
 .semantic-grid small, .semantic-grid strong { display: block; }
 .semantic-grid small { color: var(--quiet); font-size: 8px; }
 .semantic-grid strong { margin-top: 3px; font-size: 10px; line-height: 1.35; }
+#semantic-object > span, #semantic-object > code, .semantic-object-value > span, .semantic-object-value > code { display: block; }
 .provenance-panel { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--ask); background: var(--ask-soft); }
 .provenance-panel.empty-state { border-left-color: var(--line-strong); background: var(--surface-subtle); }
 .provenance-panel small, .provenance-panel b, .provenance-panel code { display: block; }
@@ -275,6 +286,8 @@ main { grid-column: 2; min-width: 0; padding: 0 24px 28px; }
 .trace-drawer summary b, .trace-drawer summary small, .settings-drawer summary b, .settings-drawer summary small { display: block; }
 .trace-drawer summary small, .settings-drawer summary small { margin-top: 1px; color: var(--quiet); font-size: 9px; }
 .trace-drawer summary em, .settings-drawer summary em { color: var(--primary); font-size: 10px; font-style: normal; }
+.trace-drawer[open] > summary > em, .settings-drawer[open] > summary > em { font-size: 0; }
+.trace-drawer[open] > summary > em::after, .settings-drawer[open] > summary > em::after { content: "收起"; font-size: 10px; }
 .trace-events { padding: 4px 14px 13px; display: grid; gap: 5px; }
 .trace-events.empty-state { min-height: 100px; display: grid; place-items: center; }
 .trace-stage { border-top: 1px solid var(--line); }
@@ -369,6 +382,9 @@ textarea { width: 100%; min-height: 72px; padding: 8px; resize: vertical; }
 .readable-evidence { margin: 0; padding: 8px 10px; border-left: 3px solid var(--ask); background: var(--ask-soft); }
 .readable-evidence b, .readable-evidence span { display: block; }
 .readable-evidence span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.readable-evidence.neutral { border-left-color: var(--line-strong); background: var(--surface-subtle); }
+.readable-evidence.neutral b { color: var(--text); }
+.readable-evidence.risk { border-left-color: var(--ask); background: var(--ask-soft); }
 .audit-record-flow { margin: 0 0 7px; color: var(--muted); font-size: 10px; }
 .audit-evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .audit-evidence-grid > div { padding: 8px 10px; }

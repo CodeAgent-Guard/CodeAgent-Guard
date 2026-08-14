@@ -82,13 +82,14 @@ function workspaceRoots() {
 }
 
 function workspaceName() {
-  const root = first(state.health?.workspace, state.trustedWorkspaces[0]?.path, state.trustedWorkspaces[0]);
+  const activeTrusted = state.trustedWorkspaces.find(item => item?.active);
+  const root = first(activeTrusted?.path, state.trustedWorkspaces[0]?.path, state.trustedWorkspaces[0], state.health?.workspace);
   if (!root) return "当前工作区";
   const canonical = canonicalPath(root);
   const name = pathBaseName(canonical);
   if (name.toLowerCase() !== "workspace") return name;
   const parent = canonical.split("/").filter(Boolean).at(-2);
-  return parent ? `${parent} · workspace` : name;
+  return parent || name;
 }
 
 function looksLikeFile(path) {
@@ -140,7 +141,7 @@ function pathPresentation(value) {
     const outsideWorkspace = relativePathEscapes(path) || (absolute && !insideWorkspace);
     const evidencePath = /^\.\.\//.test(path) ? path : isolatedSensitive[1];
     return {
-      label: `隔离演示敏感文件｜${evidencePath}${outsideWorkspace ? "（工作区外）" : ""}`,
+      label: `隔离敏感文件｜${evidencePath}${outsideWorkspace ? "（工作区外）" : ""}`,
       scope: outsideWorkspace ? "工作区外 · 隔离测试资源" : "隔离测试资源",
       relative: evidencePath,
       raw,
@@ -201,6 +202,53 @@ function pathPresentation(value) {
     return {label: `系统配置目录｜${path.replace(/^[a-z]:/i, "")}`, scope: "工作区外", relative: path, raw};
   }
   return {label: `工作区外｜${pathBaseName(path)}`, scope: "工作区外", relative: pathBaseName(path), raw};
+}
+
+function sensitivePathSuffix(value) {
+  const path = canonicalPath(value).replace(/^~\//, "");
+  const ssh = path.match(/(?:^|\/)(\.ssh\/(?:id_rsa|id_ed25519|authorized_keys))(?:$|\/)/i);
+  if (ssh) return `…/${ssh[1]}`;
+  const env = path.match(/(?:^|\/)(\.env(?:\.[^/]*)?)(?:$|\/)/i);
+  if (env) return `…/${env[1]}`;
+  const credentials = path.match(/(?:^|\/)([^/]*credentials[^/]*)(?:$|\/)/i);
+  if (credentials) return `…/${credentials[1]}`;
+  return "";
+}
+
+function compactPath(value, presented = pathPresentation(value)) {
+  const sensitive = sensitivePathSuffix(first(presented.relative, value));
+  if (sensitive) return sensitive;
+  const relative = String(presented.relative || "").replaceAll("\\", "/");
+  if (!relative || relative === ".") return "";
+  if (relative.length <= 46) return relative;
+  const parts = relative.split("/").filter(Boolean);
+  const tail = parts.slice(-2).join("/");
+  return tail ? `…/${tail}` : truncate(relative, 46);
+}
+
+function pathTargetPresentation(value) {
+  const presented = pathPresentation(value);
+  const semantic = String(presented.label || "目标资源").split("｜")[0].trim();
+  return {
+    ...presented,
+    semantic,
+    short: compactPath(value, presented),
+  };
+}
+
+function pathTargetText(target) {
+  if (!target) return "目标资源";
+  return target.short ? `${target.semantic}｜${target.short}` : target.semantic;
+}
+
+function pathTargetMarkup(target) {
+  if (!target) return "";
+  return `<span class="path-presentation"><span>${esc(target.semantic)}</span>${target.short ? `<code>${esc(target.short)}</code>` : ""}</span>`;
+}
+
+function argumentRowMarkup(row, tag = "code") {
+  if (row.pathTarget) return pathTargetMarkup(row.pathTarget);
+  return `<${tag}>${esc(row.value)}</${tag}>`;
 }
 
 function identifierRef(kind, value, {copy = true} = {}) {
@@ -318,6 +366,37 @@ function displayTaskSummary(value, length = 160) {
   const boundary = task.slice(36).search(/[；。]/);
   const focused = boundary >= 0 ? task.slice(0, boundary + 37) : task;
   return truncate(focused, length);
+}
+
+function taskPurposeSummary(value) {
+  const task = displayTask(value);
+  const match = task.match(/(?:用于|以便|以|来)?(验证[^；。]{0,36}(?:拦截|阻断|安全网关)[^；。]{0,12})/i);
+  if (!match) return "";
+  return match[1]
+    .replace(/CodeAgent[- ]Guard/gi, "安全网关")
+    .replace(/验证\s+/, "验证")
+    .replace(/安全网关\s*(?:的)?\s*拦截/g, "安全网关拦截")
+    .trim();
+}
+
+function taskActionSummary(tool, semantics) {
+  if (tool === "read_file") return "尝试读取";
+  if (tool === "list_directory") return "查看";
+  if (tool === "search_files") return "搜索";
+  if (tool === "write_file") return "修改";
+  if (tool === "delete_path") return "删除";
+  if (tool === "move_path") return "移动";
+  if (tool === "run_command") return semantics?.action || "执行受控命令";
+  return semantics?.action || `${tool || "工具"}操作`;
+}
+
+function taskSummaryForCall(task, tool, args = {}, group = null, length = 160) {
+  if (!tool) return displayTaskSummary(task, length);
+  const semantics = semanticFor(tool, args, group);
+  const object = semantics.object || "目标资源";
+  const action = taskActionSummary(tool, semantics);
+  const purpose = taskPurposeSummary(task);
+  return truncate(`${action}${object}${purpose ? `，${purpose}` : ""}`, length);
 }
 
 function showDataStatus() {
@@ -523,10 +602,12 @@ async function choosePrimaryTrace(summaries = state.traces) {
     }
   }));
   const complete = candidates.filter(trace => trace && traceIsComplete(trace));
-  const directDeny = complete.find(trace => {
+  const isDirectDeny = trace => {
     const group = preferredCall(trace);
     return decisionClass(group?.fusionDecision) === "deny" && !group?.approval && group?.action?.details?.executed === false;
-  });
+  };
+  const directDeny = complete.find(trace => runtimeIdentity(trace.agent_id).kind === "opencode" && isDirectDeny(trace))
+    || complete.find(isDirectDeny);
   if (directDeny) return directDeny;
   if (complete[0]) return complete[0];
   const fallback = summaries.find(summary => Number(summary.event_count || 0) > 0 && Number(summary.event_count || 0) <= 80) || summaries[0];
@@ -576,6 +657,22 @@ function auditRecordsForGroup(group, traceId = state.selectedTrace?.trace_id) {
     .sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
 }
 
+function executionSuccessSummary(tool) {
+  const summaries = {
+    read_file: "文件读取成功；完整返回内容可在执行结果详情中核验。",
+    list_directory: "目录读取成功；完整目录项可在执行结果详情中核验。",
+    search_files: "文件搜索完成；完整匹配结果可在执行结果详情中核验。",
+    write_file: "文件写入完成；写入结果可在执行结果详情中核验。",
+    move_path: "移动操作完成；完整结果可在执行结果详情中核验。",
+    delete_path: "删除操作完成；完整结果可在执行结果详情中核验。",
+    make_directory: "目录创建完成；完整结果可在执行结果详情中核验。",
+    open_directory: "目录打开请求已完成；完整结果可在执行结果详情中核验。",
+    http_request: "受控网络请求已完成；完整响应可在执行结果详情中核验。",
+    send_email: "邮件操作已完成；完整结果可在执行结果详情中核验。",
+  };
+  return summaries[tool] || "工具完成执行；完整返回内容可在执行结果详情中核验。";
+}
+
 function executionState(group, auditEvent = null) {
   if (!group) return {key: "unknown", title: "状态未知", detail: "没有可关联的执行事件。"};
   const action = group.action?.details || {};
@@ -619,7 +716,7 @@ function executionState(group, auditEvent = null) {
       const exitCode = Number(payload.exit_code);
       return {key: exitCode === 0 ? "executed" : "executed_nonzero", title: `已执行 · 退出码 ${exitCode}`, detail: exitCode === 0 ? "工具完成执行。" : "工具已运行，但进程以非零状态退出。"};
     }
-    return {key: "executed", title: "工具已执行", detail: group.result?.summary || auditEvent?.result_summary || "执行器已返回结果。"};
+    return {key: "executed", title: "工具已执行", detail: executionSuccessSummary(group.tool)};
   }
   return {key: "unknown", title: "执行状态未记录", detail: "Trace 中没有可确认的 Tool Proxy 执行动作。"};
 }
@@ -683,9 +780,13 @@ function argumentSummary(tool, args = {}) {
   if (tool === "run_command") {
     const target = commandTarget(command);
     rows.push({label: "命令摘要", value: commandDisplay(command)});
-    if (target) rows.push({label: "关键参数", value: pathPresentation(target).label});
-    rows.push({label: "执行位置", value: pathPresentation(cwd).label});
-    return {rows, oneLine: commandDisplay(command), scope: pathPresentation(cwd).label};
+    if (target) {
+      const pathTarget = pathTargetPresentation(target);
+      rows.push({label: "关键参数", value: pathTargetText(pathTarget), pathTarget});
+    }
+    const cwdTarget = pathTargetPresentation(cwd);
+    rows.push({label: "执行位置", value: pathTargetText(cwdTarget), pathTarget: cwdTarget});
+    return {rows, oneLine: commandDisplay(command), scope: pathTargetText(cwdTarget)};
   }
   if (tool === "move_path") {
     const source = first(args.source, args.src, args.from, path);
@@ -700,9 +801,10 @@ function argumentSummary(tool, args = {}) {
   }
   if (path) {
     const presented = pathPresentation(path);
-    rows.push({label: "关键参数", value: presented.label});
+    const pathTarget = pathTargetPresentation(path);
+    rows.push({label: "关键参数", value: pathTargetText(pathTarget), pathTarget});
     rows.push({label: "执行范围", value: presented.scope});
-    return {rows, oneLine: presented.label, scope: presented.scope};
+    return {rows, oneLine: pathTargetText(pathTarget), scope: presented.scope};
   }
   if (args.url) rows.push({label: "目标", value: truncate(args.url, 80)});
   else if (args.to) rows.push({label: "目标", value: truncate(args.to, 80)});
@@ -729,29 +831,49 @@ function semanticFor(tool, args = {}, group = null) {
   const target = path || command || url || String(args.to || "");
   const shellTarget = commandTarget(command);
   if (/cat\s+.*(?:\.ssh[\\/]|id_rsa|id_ed25519)/i.test(command) || /(?:\.ssh[\\/]|id_rsa|id_ed25519)/i.test(path)) {
-    return {object: pathPresentation(path || shellTarget).label, action: "读取并输出敏感文件", effect: "敏感凭据可能暴露"};
+    const objectTarget = pathTargetPresentation(path || shellTarget);
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: "读取并输出敏感文件", effect: "敏感凭据可能暴露"};
   }
   if (tool === "run_command" && /^\s*pwd\s*$/i.test(command)) {
-    return {object: pathPresentation(first(args.cwd, args.workdir, state.health?.workspace, ".")).label, action: "显示当前执行目录", effect: "仅产生目录路径输出，不修改文件"};
+    const objectTarget = pathTargetPresentation(first(args.cwd, args.workdir, state.health?.workspace, "."));
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: "显示当前执行目录", effect: "仅产生目录路径输出，不修改文件"};
   }
   if (tool === "run_command" && /(?:pytest|npm\s+(?:run\s+)?test|python\s+-m\s+pytest)/i.test(command)) {
-    return {object: shellTarget ? pathPresentation(shellTarget).label : "工作区测试目录", action: "运行项目测试", effect: "产生测试输出与短时子进程，不应修改项目文件"};
+    const objectTarget = shellTarget ? pathTargetPresentation(shellTarget) : null;
+    return {object: objectTarget?.semantic || "工作区测试目录", objectPath: objectTarget?.short || "", action: "运行项目测试", effect: "产生测试输出与短时子进程，不应修改项目文件"};
   }
   if (tool === "read_file") {
-    return {object: path ? pathPresentation(path).label : "工作区文件", action: "读取文件内容", effect: "文件内容进入 Agent 上下文，不修改文件"};
+    const objectTarget = path ? pathTargetPresentation(path) : null;
+    return {object: objectTarget?.semantic || "工作区文件", objectPath: objectTarget?.short || "", action: "读取文件内容", effect: "文件内容进入 Agent 上下文，不修改文件"};
   }
   if (tool === "write_file") {
     const config = /\.ya?ml$|\.json$|\.toml$|\.ini$/i.test(path);
-    return {object: path ? pathPresentation(path).label : "未指定文件", action: "创建或覆盖文件内容", effect: config ? "改变项目运行配置" : "修改工作区状态"};
+    const objectTarget = path ? pathTargetPresentation(path) : null;
+    return {object: objectTarget?.semantic || "未指定文件", objectPath: objectTarget?.short || "", action: "创建或覆盖文件内容", effect: config ? "改变项目运行配置" : "修改工作区状态"};
   }
-  if (tool === "delete_path") return {object: pathPresentation(path || target).label, action: "删除文件或空目录", effect: "目标内容不可继续使用"};
+  if (tool === "delete_path") {
+    const objectTarget = pathTargetPresentation(path || target);
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: "删除文件或空目录", effect: "目标内容不可继续使用"};
+  }
   if (tool === "move_path") return {object: `${pathPresentation(first(path, args.source, args.src, args.from)).label} → ${pathPresentation(first(args.destination, args.dst, args.to)).label}`, action: "移动或重命名", effect: "原路径引用可能失效"};
   if (tool === "http_request") return {object: `网络端点：${url || "未指定"}`, action: "发起受控网络请求", effect: "数据可能离开本机"};
   if (tool === "send_email") return {object: `邮件收件人：${args.to || "未指定"}`, action: "发送或排队邮件", effect: "内容可能对外传输"};
-  if (tool === "run_command" && /^\s*(?:ls|find)\b/i.test(command)) return {object: pathPresentation(shellTarget || first(args.cwd, ".")).label, action: /^\s*ls\b/i.test(command) ? "列出目录内容" : "搜索目录与文件", effect: "文件名或匹配结果进入 Agent 上下文，不修改文件"};
-  if (tool === "run_command" && /^\s*(?:cat|head|tail|wc|stat)\b/i.test(command)) return {object: pathPresentation(shellTarget).label, action: /^\s*stat\b/i.test(command) ? "读取文件元数据" : "读取并输出文件内容", effect: "读取结果进入 Agent 上下文，不修改文件"};
-  if (tool === "run_command") return {object: shellTarget ? pathPresentation(shellTarget).label : pathPresentation(first(args.cwd, ".")).label, action: commandDisplay(command), effect: "启动受控子进程；具体影响由命令和参数决定"};
-  if (tool === "list_directory" || tool === "search_files") return {object: pathPresentation(path || ".").label, action: tool === "list_directory" ? "列出目录内容" : "搜索工作区文件", effect: "文件名或匹配内容进入 Agent 上下文，不修改文件"};
+  if (tool === "run_command" && /^\s*(?:ls|find)\b/i.test(command)) {
+    const objectTarget = pathTargetPresentation(shellTarget || first(args.cwd, "."));
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: /^\s*ls\b/i.test(command) ? "列出目录内容" : "搜索目录与文件", effect: "文件名或匹配结果进入 Agent 上下文，不修改文件"};
+  }
+  if (tool === "run_command" && /^\s*(?:cat|head|tail|wc|stat)\b/i.test(command)) {
+    const objectTarget = pathTargetPresentation(shellTarget);
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: /^\s*stat\b/i.test(command) ? "读取文件元数据" : "读取并输出文件内容", effect: "读取结果进入 Agent 上下文，不修改文件"};
+  }
+  if (tool === "run_command") {
+    const objectTarget = pathTargetPresentation(shellTarget || first(args.cwd, "."));
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: commandDisplay(command), effect: "启动受控子进程；具体影响由命令和参数决定"};
+  }
+  if (tool === "list_directory" || tool === "search_files") {
+    const objectTarget = pathTargetPresentation(path || ".");
+    return {object: objectTarget.semantic, objectPath: objectTarget.short, action: tool === "list_directory" ? "列出目录内容" : "搜索工作区文件", effect: "文件名或匹配内容进入 Agent 上下文，不修改文件"};
+  }
   const feature = (group?.ct?.details?.features || []).find(item => item.name === "ActionRisk");
   return {object: target || "工具参数指定的资源", action: `${tool || "工具"} 操作`, effect: feature?.reason || "可能改变受控资源状态"};
 }
@@ -783,6 +905,57 @@ function policyEvidence(group) {
     ...legacyCtReasons,
   ]);
   return rules.filter(rule => !ctOnlyReasons.has(rule) && !dlpReasons.has(rule));
+}
+
+function riskSourceFor(group, event, semantics, args = {}) {
+  const ct = group?.ct?.details || event?.ct_trm || {};
+  const policyRules = group ? policyEvidence(group) : reasonCodes(event?.reasons);
+  const positiveFeatures = (ct.features || [])
+    .filter(item => Number(item?.score || 0) > 0 && ["AssetRisk", "BoundaryRisk", "ActionRisk", "TaintRisk", "ChainRisk"].includes(item?.name))
+    .sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+  const mainFeature = positiveFeatures[0] || null;
+  const dlpCount = Number(first(group?.dlp?.details?.finding_count, event?.ct_trm?.dlp_findings?.length, 0));
+  const evidenceCodes = new Set([...policyRules, ...reasonCodes(ct.reasons)]);
+  const featureReason = String(mainFeature?.reason || "");
+  const hasSensitiveEvidence = [...evidenceCodes].some(code => /sensitive|credential|secret/i.test(code))
+    || /ssh|云凭据|敏感|凭据|私钥|credential|secret/i.test(featureReason);
+  let title = "受控工具行为";
+  if (mainFeature?.name === "AssetRisk" && hasSensitiveEvidence) title = "敏感资源访问";
+  else if (mainFeature?.name === "AssetRisk" && /配置|config/i.test(featureReason)) title = "工作区配置资源访问";
+  else if (mainFeature?.name === "AssetRisk") title = "受控资源访问";
+  else if (mainFeature?.name === "BoundaryRisk") title = "工作区边界访问";
+  else if (mainFeature?.name === "ActionRisk") title = "具有副作用的操作";
+  else if (mainFeature?.name === "TaintRisk") title = "低可信内容传播";
+  else if (mainFeature?.name === "ChainRisk") title = "调用链组合风险";
+  else if ([...evidenceCodes].some(code => /sensitive|credential|secret/i.test(code))) title = "敏感资源访问";
+  else if ([...evidenceCodes].some(code => /outside|traversal|boundary|escape/i.test(code))) title = "工作区边界访问";
+  else if (dlpCount > 0) title = "敏感内容命中";
+  else if (!policyRules.length && !positiveFeatures.length && dlpCount === 0) title = "未形成高风险来源";
+
+  const featureEvidence = mainFeature?.evidence || {};
+  const command = first(args.cmd, args.command, featureEvidence.cmd, featureEvidence.command, "");
+  const path = first(args.path, args.filePath, args.file_path, featureEvidence.path, commandTarget(command));
+  const pathTarget = path ? pathTargetPresentation(path) : null;
+  return {
+    title,
+    target: semantics?.object || pathTarget?.semantic || event?.tool || "目标资源",
+    path: first(semantics?.objectPath, pathTarget?.short, ""),
+    feature: mainFeature,
+  };
+}
+
+function pollutionFor(group, event, trace) {
+  const ct = group?.ct?.details || event?.ct_trm || {};
+  const matches = ct.taint_matches || [];
+  const edges = ct.provenance_edges || [];
+  const explicitlyTainted = Boolean(group?.plan?.details?.tainted || event?.tainted);
+  if (matches.length || edges.length) {
+    const source = first(matches[0]?.source_origin, matches[0]?.origin, matches[0]?.source, edges[0]?.metadata?.source, sourceFrom(group, trace));
+    const argument = first(matches[0]?.argument, edges[0]?.metadata?.argument, "工具参数");
+    return {risk: true, title: "提示污染｜检测到传播", detail: `${sourcePresentation(source)} → 参数 ${argument} → ${event?.tool || group?.tool || "工具"}`};
+  }
+  if (explicitlyTainted) return {risk: false, title: "来源可信度｜已标记低可信", detail: "当前未建立可核对的参数传播路径。"};
+  return {risk: false, title: "提示污染｜未检测到传播", detail: `调用来源｜${sourcePresentation(sourceFrom(group, trace))}`};
 }
 
 function decisionReason(group) {
@@ -950,7 +1123,7 @@ function renderOverview() {
     risksNode.textContent = "最近 100 条审计记录中没有高风险事件";
   } else {
     risksNode.className = "risk-list";
-    risksNode.innerHTML = risks.map(event => `<button class="risk-item" type="button" data-audit-seq="${event.seq}"><span>${esc(riskLabel(event.risk_level))}</span><div><b>${esc(event.tool)}</b><small>${esc(displayTaskSummary(event.task, 52))}</small></div><time>${esc(formatDate(event.timestamp).slice(5, 16))}</time></button>`).join("");
+    risksNode.innerHTML = risks.map(event => `<button class="risk-item" type="button" data-audit-seq="${event.seq}"><span>${esc(riskLabel(event.risk_level))}</span><div><b>${esc(event.tool)}</b><small>${esc(taskSummaryForCall(event.task, event.tool, event.args || {}, null, 52))}</small></div><time>${esc(formatDate(event.timestamp).slice(5, 16))}</time></button>`).join("");
   }
   const trace = state.latestTrace || null;
     renderOverviewCurrent(trace);
@@ -979,14 +1152,15 @@ function renderOverviewCurrent(trace) {
   const decision = decisionView.decision;
   badge.className = `decision-badge ${decision}`;
   badge.textContent = decisionView.status;
-  setText("#runtime-trace", `${displayTaskSummary(trace.task, 28)} · Trace ${shortTrace(trace.trace_id)}`);
+  const taskSummary = taskSummaryForCall(trace.task, group.tool, group.args || {}, group, 92);
+  setText("#runtime-trace", `${taskSummary} · Trace ${shortTrace(trace.trace_id)}`);
   const summary = argumentSummary(group.tool, group.args || {});
   const audit = group.audit?.details || {};
   const verified = state.chainVerification?.valid === true;
   node.className = "current-call";
   node.innerHTML = `<div class="overview-call">
-    <div class="overview-task"><small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(displayTaskSummary(trace.task, 180))}</b><span>${identifierRef("Trace", trace.trace_id)}</span></div>
-    <div class="overview-code overview-tool-summary">${summary.rows.map(row => `<div><small>${esc(row.label)}</small><code>${esc(row.value)}</code></div>`).join("")}</div>
+    <div class="overview-task"><small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(taskSummary)}</b><span>${identifierRef("Trace", trace.trace_id)}</span>${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}</div>
+    <div class="overview-code overview-tool-summary">${summary.rows.map(row => `<div><small>${esc(row.label === "关键参数" ? "目标" : row.label)}</small>${argumentRowMarkup(row)}</div>`).join("")}</div>
     <div class="overview-outcome">
       <div><small>${esc(decisionView.source)}</small><b>${esc(decisionView.status)} · ${esc(riskLabel(group.risk))}</b><span>${esc(fusionDecisionReason(group))}</span></div>
       <div><small>执行状态</small><b>${esc(execution.title)}</b><span>${esc(humanizeMachineText(execution.detail, trace.trace_id))}</span></div>
@@ -1053,7 +1227,12 @@ function renderHistory() {
   node.innerHTML = traces.slice(0, 20).map(item => {
     const trace = item.trace;
     const identity = runtimeIdentity(trace.agent_id);
-    return `<button type="button" class="${item.selected ? "active" : ""}" data-trace-id="${esc(trace.trace_id)}"><b>${esc(displayTaskSummary(trace.task, 50))}</b><span>${esc(identity.entry)} · Trace ${esc(shortTrace(trace.trace_id))} · ${esc(formatDate(trace.updated_at))}${item.count > 1 ? ` · ${item.count} 次同类运行` : ""}</span></button>`;
+    const loadedTrace = [state.selectedTrace, state.latestTrace].find(value => value?.trace_id === trace.trace_id);
+    const loadedGroup = loadedTrace ? preferredCall(loadedTrace) : null;
+    const taskSummary = loadedGroup
+      ? taskSummaryForCall(trace.task, loadedGroup.tool, loadedGroup.args || {}, loadedGroup, 50)
+      : displayTaskSummary(trace.task, 50);
+    return `<button type="button" class="${item.selected ? "active" : ""}" data-trace-id="${esc(trace.trace_id)}"><b>${esc(taskSummary)}</b><span>${esc(identity.entry)} · Trace ${esc(shortTrace(trace.trace_id))} · ${esc(formatDate(trace.updated_at))}${item.count > 1 ? ` · ${item.count} 次同类运行` : ""}</span></button>`;
   }).join("");
 }
 
@@ -1071,7 +1250,8 @@ function renderWorkbench() {
   }
   state.selectedCallId = group.callId;
   $("#task-summary").className = "task-summary";
-  $("#task-summary").innerHTML = `<small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(displayTaskSummary(trace.task, 180))}</b>${identifierRef("Trace", trace.trace_id)}${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}`;
+  const selectedTaskSummary = taskSummaryForCall(trace.task, group.tool, group.args || {}, group, 180);
+  $("#task-summary").innerHTML = `<small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(selectedTaskSummary)}</b>${identifierRef("Trace", trace.trace_id)}${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}`;
   $("#call-timeline").innerHTML = groups.map((item, index) => {
     const summary = argumentSummary(item.tool, item.policy?.details?.normalized_arguments || item.args || {});
     return `<button type="button" class="call-item ${decisionClass(item.decision)} ${item.callId === group.callId ? "active" : ""}" data-call-id="${esc(item.callId)}"><i>${index + 1}</i><div><b>${esc(item.tool)}</b><small>${esc(truncate(summary.oneLine, 48))}</small></div><em>${esc(decisionLabel(item.decision))}</em></button>`;
@@ -1092,12 +1272,12 @@ function renderWorkbench() {
   const presentationArgs = presentationArgsForGroup(group, normalizedArgs);
   const argumentInfo = argumentSummary(group.tool, presentationArgs);
   $("#toolcall-detail").className = "toolcall-detail";
-  $("#toolcall-detail").innerHTML = `${argumentInfo.rows.map((row, index) => `<div><small>${esc(index === 0 ? "原始工具" : row.label)}</small><${index === 0 ? "b" : "code"}>${esc(index === 0 ? rawTool : row.value)}</${index === 0 ? "b" : "code"}></div>`).join("")}
+  $("#toolcall-detail").innerHTML = `${argumentInfo.rows.map((row, index) => `<div><small>${esc(index === 0 ? "原始工具" : row.label)}</small>${index === 0 ? `<b>${esc(rawTool)}</b>` : argumentRowMarkup(row)}</div>`).join("")}
     <div><small>统一 ToolCall 类型</small><code>${esc(group.tool)}</code></div>
     ${rawDetails("查看原始 ToolCall", {raw_tool: rawTool, raw_arguments: rawArgs, normalized_tool: group.tool, normalized_arguments: normalizedArgs})}`;
 
   const semantics = semanticFor(group.tool, presentationArgs, group);
-  setText("#semantic-object", semantics.object);
+  $("#semantic-object").innerHTML = `<span>${esc(semantics.object)}</span>${semantics.objectPath ? `<code>${esc(semantics.objectPath)}</code>` : ""}`;
   setText("#semantic-action", semantics.action);
   setText("#semantic-effect", semantics.effect);
 
@@ -1214,7 +1394,7 @@ function traceEventPresentation(event, trace, group) {
   const normalizedArgs = group?.policy?.details?.normalized_arguments || group?.args || {};
   const presentationArgs = presentationArgsForGroup(group, normalizedArgs);
   const summary = argumentSummary(group?.tool, presentationArgs);
-  if (phaseName === "user_task") return {actor: "用户", title: "任务已进入安全网关", summary: displayTaskSummary(trace?.task || event.summary, 110)};
+  if (phaseName === "user_task") return {actor: "用户", title: "任务已进入安全网关", summary: taskSummaryForCall(trace?.task || event.summary, group?.tool, presentationArgs, group, 110)};
   if (phaseName === "task_authorization") return {actor: "任务授权", title: "提取本次任务边界", summary: truncate(humanizeMachineText(event.summary || "已确定允许工具与资源范围", trace?.trace_id), 110)};
   if (phaseName === "agent_synthesis") return {actor: "Agent", title: "汇总受控工具结果", summary: truncate(humanizeMachineText(event.summary || "根据已执行结果生成回答", trace?.trace_id), 110)};
   if (phaseName === "final_answer") return {actor: "Agent", title: "任务结束", summary: truncate(humanizeMachineText(event.summary || "最终回答已记录", trace?.trace_id), 110)};
@@ -1497,7 +1677,7 @@ function renderAuditList() {
     const ordinal = sameTrace.findIndex(item => item.key === group.key) + 1;
     const semantics = semanticFor(event.tool, event.args || {});
     const identity = runtimeIdentity(traceAgentId(event.trace_id));
-    return `<button class="audit-row ${active ? "active" : ""}" type="button" data-audit-seq="${event.seq}"><span class="${lifecycle.decision}">${esc(lifecycle.label)}</span><div><b>调用 ${ordinal || 1} · ${esc(event.tool)} · ${esc(truncate(semantics.object, 42))}</b><small>${esc(resultText)} · ${esc(displayTaskSummary(event.task, 54))}</small><code>${esc(identity.entry)} · Trace ${esc(shortTrace(event.trace_id))} · ${group.events.length} 条关联记录</code></div><time>${esc(formatDate(group.events.at(-1)?.timestamp).slice(5, 16))}</time></button>`;
+    return `<button class="audit-row ${active ? "active" : ""}" type="button" data-audit-seq="${event.seq}"><span class="${lifecycle.decision}">${esc(lifecycle.label)}</span><div><b>调用 ${ordinal || 1} · ${esc(event.tool)} · ${esc(truncate(semantics.object, 42))}</b><small>${esc(resultText)} · ${esc(taskSummaryForCall(event.task, event.tool, event.args || {}, null, 54))}</small><code>${esc(identity.entry)} · Trace ${esc(shortTrace(event.trace_id))} · ${group.events.length} 条关联记录</code></div><time>${esc(formatDate(group.events.at(-1)?.timestamp).slice(5, 16))}</time></button>`;
   }).join("");
   requestAnimationFrame(() => {
     const active = node.querySelector(".audit-row.active");
@@ -1554,11 +1734,6 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
     : state.chainVerification?.valid === false
       ? `全局链校验失败，断点 #${state.chainVerification.broken_at}。`
       : "当前只确认记录已写入，尚未取得全局校验结论。";
-  const dangerWhy = [
-    ...policyRules.slice(0, 3).map(reasonText),
-    ...patterns.slice(0, 2).map(item => `${item.pattern_id || "模式"} ${item.name || item.explanation}`),
-    ...legacyFusedReasons.slice(0, 3).map(reasonText),
-  ].filter(Boolean).join("；") || "没有记录到阻断风险证据";
   const traceEvents = group ? traceEventsForCall(trace, group) : (trace?.events || []);
   const normalizedArgs = group?.policy?.details?.normalized_arguments || event.args || {};
   const presentationArgs = presentationArgsForGroup(group, normalizedArgs);
@@ -1578,20 +1753,29 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
   const identity = runtimeIdentity(first(trace?.agent_id, traceAgentId(event.trace_id)));
   const chainStatus = state.chainVerification?.valid === true ? "校验通过" : state.chainVerification?.valid === false ? "校验失败" : "已写入，待校验";
   const chainCount = state.chainVerification?.events ?? "—";
-  panel.innerHTML = `<div class="audit-detail-head"><div><span class="section-kicker">${esc(runtimeIdentityLabel(first(trace?.agent_id, traceAgentId(event.trace_id))))}</span><h2>${esc(event.tool)} · ${esc(displayTaskSummary(event.task, 140))}</h2>${identifierRef("Trace", event.trace_id)}</div><span class="decision-badge ${decisionView.decision}">${esc(decisionView.status)}</span></div>
+  const taskSummary = taskSummaryForCall(event.task, event.tool, presentationArgs, group, 180);
+  const riskSource = riskSourceFor(group, event, semantics, presentationArgs);
+  const pollution = pollutionFor(group, event, trace);
+  const riskBasis = [
+    `Policy｜${policyText}`,
+    `CT-TRM｜${group?.ct || event.ct_trm ? `风险分 ${Number(ct.total_score || 0)}${ct.hard_deny ? "，达到硬拒绝条件" : ""}` : "未记录独立评估"}`,
+    `DLP｜${dlpInputText}`,
+  ];
+  const auditTitle = `${event.tool} · ${semantics.object}${/读取|访问|列出|搜索/.test(semantics.action) ? "访问" : "操作"}`;
+  panel.innerHTML = `<div class="audit-detail-head"><div><span class="section-kicker">${esc(runtimeIdentityLabel(first(trace?.agent_id, traceAgentId(event.trace_id))))}</span><h2>${esc(auditTitle)}</h2>${identifierRef("Trace", event.trace_id)}</div><span class="decision-badge ${decisionView.decision}">${esc(decisionView.status)}</span></div>
     <div class="question-grid">
-      <div class="question-card"><small>危险从哪里来？</small><b>${esc(sourcePresentation(source))}</b><span>${event.tainted ? "该来源被标记为低可信并进入参数传播分析。" : "未标记为污染来源。"}</span></div>
-      <div class="question-card"><small>为什么危险？</small><b>${esc(truncate(humanizeMachineText(dangerWhy, event.trace_id), 92))}</b><span>依据真实 Policy / CT-TRM / DLP 事件。</span></div>
+      <div class="question-card"><small>风险来源</small><b>${esc(riskSource.title)}</b><span>目标｜${esc(riskSource.target)}${riskSource.path ? `<br>关键路径｜<code>${esc(riskSource.path)}</code>` : ""}</span></div>
+      <div class="question-card risk-basis"><small>风险依据</small><b>Policy / CT-TRM / DLP</b><span>${riskBasis.map(item => esc(humanizeMachineText(item, event.trace_id))).join("<br>")}</span></div>
       <div class="question-card"><small>最终有没有执行？</small><b>${esc(execution.title)}</b><span>${esc(humanizeMachineText(execution.detail, event.trace_id))}</span></div>
     </div>
-    <section class="detail-section"><h3>任务目标与待执行动作</h3><dl class="detail-facts"><div><dt>任务目标</dt><dd>${esc(displayTaskSummary(event.task, 260))}</dd></div><div><dt>运行入口</dt><dd>${esc(identity.entry)}</dd></div>${identity.adapter ? `<div><dt>适配器</dt><dd>${esc(identity.adapter)}</dd></div>` : ""}${argumentInfo.rows.map(row => `<div><dt>${esc(row.label)}</dt><dd>${esc(row.value)}</dd></div>`).join("")}</dl>${rawDetails("查看完整任务", {task: event.task, trace_id: event.trace_id, agent_id: first(trace?.agent_id, traceAgentId(event.trace_id))})}</section>
-    <section class="detail-section"><h3>参数安全语义</h3><dl class="detail-facts three"><div><dt>访问对象</dt><dd>${esc(semantics.object)}</dd></div><div><dt>操作行为</dt><dd>${esc(semantics.action)}</dd></div><div><dt>可能影响</dt><dd>${esc(semantics.effect)}</dd></div></dl></section>
-    <section class="detail-section"><h3>来源与污染路径</h3><p class="readable-evidence"><b>${esc(sourcePresentation(source))}</b><span>${event.tainted ? `低可信来源 → ${esc((ct.taint_matches || [])[0]?.argument || "工具参数")} → ${esc(event.tool)}` : "未检测到参数污染传播"}</span></p></section>
+    <section class="detail-section"><h3>任务目标与待执行动作</h3><dl class="detail-facts"><div><dt>任务摘要</dt><dd>${esc(taskSummary)}</dd></div><div><dt>运行入口</dt><dd>${esc(identity.entry)}</dd></div>${identity.adapter ? `<div><dt>适配器</dt><dd>${esc(identity.adapter)}</dd></div>` : ""}${argumentInfo.rows.map(row => `<div><dt>${esc(row.label)}</dt><dd>${argumentRowMarkup(row, "span")}</dd></div>`).join("")}</dl>${rawDetails("查看完整任务", {task: event.task, trace_id: event.trace_id, agent_id: first(trace?.agent_id, traceAgentId(event.trace_id))})}</section>
+    <section class="detail-section"><h3>参数安全语义</h3><dl class="detail-facts three"><div><dt>访问对象</dt><dd><span class="semantic-object-value">${esc(semantics.object)}${semantics.objectPath ? `<code>${esc(semantics.objectPath)}</code>` : ""}</span></dd></div><div><dt>操作行为</dt><dd>${esc(semantics.action)}</dd></div><div><dt>可能影响</dt><dd>${esc(semantics.effect)}</dd></div></dl></section>
+    <section class="detail-section"><h3>来源与污染路径</h3><p class="readable-evidence ${pollution.risk ? "risk" : "neutral"}"><b>${esc(pollution.title)}</b><span>${esc(pollution.detail)}</span></p></section>
     <section class="detail-section"><h3>风险证据</h3><div class="audit-evidence-grid"><div><b>Policy Engine</b><span>${esc(policyText)}</span></div><div><b>CT-TRM</b><span>风险分 ${esc(Number(ct.total_score || 0))}${patterns.length ? ` · ${esc(patterns.slice(0, 2).map(item => item.name || item.explanation).join("、"))}` : ""}</span></div><div><b>DLP</b><span>${esc(dlpInputText)}；${esc(dlpOutputText)}</span></div></div></section>
     <section class="detail-section"><h3>裁决、审批与执行</h3><dl class="detail-facts three"><div><dt>${esc(decisionView.source)}</dt><dd>${esc(decisionView.label)} · ${esc(group ? fusionDecisionReason(group) : decisionReason({decision: event.decision}))}</dd></div><div><dt>审批过程</dt><dd>${esc(approvalSummary)}</dd></div><div><dt>执行状态</dt><dd>${esc(execution.title)}</dd></div></dl></section>
     <section class="detail-section"><h3>审计完整性</h3><dl class="detail-facts audit-integrity-facts"><div><dt>审计完整性</dt><dd>${esc(chainStatus)}</dd></div><div><dt>当前事件</dt><dd>#${esc(currentAudit.seq)}</dd></div><div><dt>全局审计链</dt><dd>${esc(chainCount)} 条记录${state.chainVerification?.valid === true ? "完整" : ""}</dd></div><div><dt>Transparency Trace</dt><dd>${esc(traceEvents.length)} 个关联事件</dd></div></dl><details class="raw-details integrity-details"><summary><span>查看完整证据链</span><em>展开</em></summary><div class="integrity-details-body"><p class="audit-record-flow">本次调用关联：${esc(auditFlow)}</p><div class="hash-link"><div><small>当前记录的前序 Hash</small>${identifierRef("Hash", currentAudit.prev_hash)}</div><i>→</i><div><small>当前记录 Hash</small>${identifierRef("Hash", currentAudit.hash)}</div></div><p>${esc(integrityText)} 任一关键记录被改动，后续记录将无法通过校验。</p></div></details></section>
     <section class="detail-section"><h3>关联 Transparency Trace</h3>${traceEvents.length ? `<div class="mini-trace">${traceEvents.map(item => { const readable = traceEventPresentation(item, trace, group); return `<div><span>#${esc(item.seq)}</span><b>${esc(readable.title)}</b><code>${esc(readable.summary)}</code></div>`; }).join("")}</div>` : `<div class="empty-state">该历史记录没有可读取的 Transparency Trace；审计记录仍然保留。</div>`}</section>
-    <section class="raw-evidence-stack">${rawDetails("查看原始 ToolCall", {raw_tool: rawPlanTool, raw_arguments: rawPlanArgs, normalized_tool: event.tool, normalized_arguments: normalizedArgs})}${rawDetails("查看完整风险证据", {source, tainted: event.tainted, policy_rules: policyRules, legacy_fused_reasons: legacyFusedReasons, ct_trm: ct, dlp_input: dlp, dlp_output: outputDlp})}${rawDetails("查看完整执行结果", {execution, trace_result: group?.result?.details || null, audit_result: resultRecord})}${rawDetails("查看原始审计事件", auditRecords)}</section>`;
+    <section class="raw-evidence-stack">${rawDetails("查看原始 ToolCall", {raw_tool: rawPlanTool, raw_arguments: rawPlanArgs, normalized_tool: event.tool, normalized_arguments: normalizedArgs})}${rawDetails("查看完整风险证据", {risk_source: riskSource, source, tainted: event.tainted, policy_rules: policyRules, legacy_fused_reasons: legacyFusedReasons, ct_trm: ct, dlp_input: dlp, dlp_output: outputDlp})}${rawDetails("查看完整执行结果", {execution, trace_result: group?.result?.details || null, audit_result: resultRecord})}${rawDetails("查看原始审计事件", auditRecords)}</section>`;
 }
 
 function renderAuditVerification(kind, title, detail) {
@@ -2164,6 +2348,9 @@ document.addEventListener("toggle", event => {
 }, true);
 
 const initialView = location.hash.slice(1);
+// Secondary configuration must never enter the initial presentation layer,
+// including after a browser reload that restores form controls.
+$("#settings-drawer").open = false;
 switchView(["dashboard", "agent", "audit", "policies"].includes(initialView) ? initialView : "dashboard");
 requestAnimationFrame(() => window.scrollTo(0, 0));
 refresh({quiet: true});
