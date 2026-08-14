@@ -33,12 +33,14 @@ data/*.sqlite
 data/*.sqlite3
 data/*server*.log
 data/*.pid
+data/server.instance.lock
 data/edge-*/
 data/evaluation/*_result.json
 workspace/
 .demo_fake_home/
 
 # Logs and temporary files
+tmp/
 *.log
 *.tmp
 *.temp

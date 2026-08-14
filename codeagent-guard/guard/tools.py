@@ -60,12 +60,32 @@ class ToolProxy:
         return self._handle(call, execute=False)
 
     def _handle(self, call: ToolCall, *, execute: bool) -> dict:
+        trace_metadata = {
+            "source": call.source,
+            **TransparencyService.redact(call.metadata or {}),
+        }
         self.transparency.begin(
             call.trace_id,
             task=call.task,
             agent_id=call.agent_id,
-            metadata={"source": call.source},
+            metadata=trace_metadata,
         )
+        plan_details = {
+            "call_id": call.call_id,
+            "tool": call.tool,
+            "arguments": call.args,
+            "source": call.source,
+            "tainted": call.tainted,
+        }
+        for key in (
+            "raw_tool",
+            "raw_arguments",
+            "execution_context",
+            "request_fingerprint",
+            "authorization_fingerprint",
+        ):
+            if key in call.metadata:
+                plan_details[key] = call.metadata[key]
         self.transparency.emit(
             call.trace_id,
             phase="agent_plan",
@@ -74,13 +94,7 @@ class ToolProxy:
             status="planned",
             title=f"请求调用工具 {call.tool}",
             summary=f"{call.agent_id} 将 {call.tool} 调用提交给 Tool Proxy。",
-            details={
-                "call_id": call.call_id,
-                "tool": call.tool,
-                "arguments": call.args,
-                "source": call.source,
-                "tainted": call.tainted,
-            },
+            details=plan_details,
         )
 
         started = time.perf_counter()
@@ -98,79 +112,118 @@ class ToolProxy:
             conversation_id=call.conversation_id,
         )
         policy_latency_ms = (time.perf_counter() - started) * 1000
-        if decision.dlp_scan:
-            dlp_status = (
-                decision.dlp_scan.get("action")
-                if decision.dlp_scan.get("finding_count")
-                else "clean"
-            )
-            dlp_direction = decision.dlp_scan.get("direction", "input")
-            dlp_title = (
-                "DLP 出站扫描：BLOCKED"
-                if dlp_direction == "outbound" and decision.dlp_scan.get("hard_deny")
-                else f"DLP 输入扫描：{str(dlp_status).upper()}"
-            )
-            self.transparency.emit(
-                call.trace_id,
-                phase="dlp_scan",
-                actor="dlp",
-                label="DLP 数据防护",
-                status=dlp_status,
-                title=dlp_title,
-                summary=(
-                    "DLP 未发现敏感数据。"
-                    if not decision.dlp_scan.get("finding_count")
-                    else (
-                        "DLP 检测到外发敏感数据，已生成脱敏摘要和 HMAC 指纹。"
-                        if dlp_direction == "outbound"
-                        else "DLP 已生成脱敏敏感数据证据。"
-                    )
-                ),
-                details={
-                    "call_id": call.call_id,
-                    "tool": call.tool,
-                    **decision.dlp_scan,
-                },
-            )
-        if decision.assessment:
-            self.transparency.emit(
-                call.trace_id,
-                phase="ct_trm_assessment",
-                actor="ct_trm",
-                label="CT-TRM 风险模型",
-                status=decision.assessment.get("action", decision.action),
-                title=(
-                    "上下文污染与工具风险评估："
-                    f"{decision.assessment.get('action', decision.action).upper()}"
-                ),
-                summary=decision.assessment.get(
-                    "explanation",
-                    "CT-TRM 已完成风险聚合。",
-                ),
-                details={
-                    "call_id": call.call_id,
-                    "tool": call.tool,
-                    **decision.assessment,
-                },
-            )
+        # The three analysis modules emit evidence only.  The final
+        # Allow/Ask/Deny outcome belongs to the separate Decision Fusion event
+        # below.  Keep ``policy_decision`` as the phase name so persisted
+        # traces and older API clients remain readable, but do not present it
+        # as the final decision for new traces.
+        policy_rules = list(decision.policy_reasons)
         self.transparency.emit(
             call.trace_id,
             phase="policy_decision",
             actor="policy_engine",
             label="Policy Engine",
+            status="matched" if policy_rules else "clear",
+            title=(
+                f"基础规则证据：命中 {len(policy_rules)} 项"
+                if policy_rules
+                else "基础规则证据：未命中规则"
+            ),
+            summary=self._policy_evidence_summary(policy_rules),
+            details={
+                "call_id": call.call_id,
+                "tool": call.tool,
+                "risk_level": decision.risk_level,
+                "matched_rules": policy_rules,
+                "normalized_arguments": decision.normalized_args,
+                "latency_ms": round(policy_latency_ms, 3),
+                "evidence_only": True,
+            },
+        )
+        assessment_evidence = dict(decision.assessment or {})
+        # ``action`` is an internal model recommendation.  Omitting it from
+        # the trace evidence prevents CT-TRM from looking like the system's
+        # final arbiter; the unmodified model output remains available in the
+        # ToolProxy result's ``ct_trm`` field for API compatibility.
+        assessment_evidence.pop("action", None)
+        assessment_evidence["reasons"] = list(decision.ct_trm_reasons)
+        ct_score = assessment_evidence.get("total_score")
+        ct_risk = str(assessment_evidence.get("risk_level") or "not_evaluated")
+        self.transparency.emit(
+            call.trace_id,
+            phase="ct_trm_assessment",
+            actor="ct_trm",
+            label="CT-TRM 风险模型",
+            status=ct_risk,
+            title=(
+                f"风险评估：{ct_score} 分 · {ct_risk.upper()}"
+                if ct_score is not None
+                else "风险评估：当前调用未启用上下文模型"
+            ),
+            summary=(
+                assessment_evidence.get("explanation")
+                or "CT-TRM 未产生额外上下文风险证据。"
+            ),
+            details={
+                "call_id": call.call_id,
+                "tool": call.tool,
+                **assessment_evidence,
+                "evidence_only": True,
+            },
+        )
+        dlp_evidence = dict(decision.dlp_scan or {})
+        # As with CT-TRM, the module-local recommendation is not the fused
+        # decision and therefore is not repeated as a trace status.
+        dlp_evidence.pop("action", None)
+        dlp_evidence["reasons"] = list(decision.dlp_reasons)
+        dlp_count = int(dlp_evidence.get("finding_count") or 0)
+        dlp_direction = str(dlp_evidence.get("direction") or "input")
+        self.transparency.emit(
+            call.trace_id,
+            phase="dlp_scan",
+            actor="dlp",
+            label="DLP 数据防护",
+            status="detected" if dlp_count else "clean",
+            title=(
+                f"DLP 检测证据：发现 {dlp_count} 项敏感内容"
+                if dlp_count
+                else "DLP 检测证据：未发现敏感内容"
+            ),
+            summary=(
+                "DLP 检测到外发敏感数据，已生成脱敏摘要和 HMAC 指纹。"
+                if dlp_count and dlp_direction == "outbound"
+                else (
+                    "DLP 已生成脱敏敏感数据证据。"
+                    if dlp_count
+                    else "DLP 未发现敏感数据。"
+                )
+            ),
+            details={
+                "call_id": call.call_id,
+                "tool": call.tool,
+                **dlp_evidence,
+                "evidence_only": True,
+            },
+        )
+        self.transparency.emit(
+            call.trace_id,
+            phase="decision_fusion",
+            actor="decision_fusion",
+            label="Decision Fusion",
             status=decision.action,
-            title=f"策略判定：{decision.action.upper()}",
-            summary=self._policy_summary(
-                decision.action, decision.risk_level, decision.reasons
+            title=f"最终安全裁决：{decision.action.upper()}",
+            summary=self._decision_fusion_summary(
+                decision.action,
+                decision.risk_level,
+                decision.reasons,
             ),
             details={
                 "call_id": call.call_id,
                 "tool": call.tool,
                 "decision": decision.action,
                 "risk_level": decision.risk_level,
-                "matched_rules": decision.reasons or ["policy_passed"],
-                "normalized_arguments": decision.normalized_args,
-                "latency_ms": round(policy_latency_ms, 3),
+                "reasons": list(decision.reasons),
+                "evidence_sources": ["policy_engine", "ct_trm", "dlp"],
             },
         )
 
@@ -225,6 +278,8 @@ class ToolProxy:
                     if result_scanner is not None:
                         result, output_scan = result_scanner(call.tool, raw_result)
                     if output_scan and output_scan.get("finding_count"):
+                        output_evidence = dict(output_scan)
+                        output_evidence.pop("action", None)
                         self.transparency.emit(
                             call.trace_id,
                             phase="dlp_scan",
@@ -238,7 +293,8 @@ class ToolProxy:
                             details={
                                 "call_id": call.call_id,
                                 "tool": call.tool,
-                                **output_scan,
+                                **output_evidence,
+                                "evidence_only": True,
                             },
                         )
                     summary = self._summarize(result)
@@ -363,6 +419,7 @@ class ToolProxy:
             result_summary=str(TransparencyService.redact(summary)),
             latency_ms=policy_latency_ms,
             ct_trm=TransparencyService.redact(decision.assessment),
+            call_id=call.call_id,
         )
         self.transparency.emit(
             call.trace_id,
@@ -540,6 +597,7 @@ class ToolProxy:
             tainted=call.tainted,
             result_summary="User rejected pending operation",
             latency_ms=0,
+            call_id=call.call_id,
         )
         self.transparency.emit(
             call.trace_id,
@@ -608,6 +666,7 @@ class ToolProxy:
                     else None
                 ),
                 conversation_id=item.get("conversation_id"),
+                metadata=item.get("metadata") or {},
                 call_id=item["call_id"],
             ),
             bool(item.get("execute", True)),
@@ -629,6 +688,7 @@ class ToolProxy:
                 else None
             ),
             "conversation_id": call.conversation_id,
+            "metadata": call.metadata,
             "call_id": call.call_id,
         }
 
@@ -680,13 +740,29 @@ class ToolProxy:
         )
 
     @staticmethod
-    def _policy_summary(action: str, risk: str, reasons: list[str]) -> str:
+    def _policy_evidence_summary(reasons: list[str]) -> str:
+        if not reasons:
+            return "Policy Engine 未命中基础风险规则。"
+        return "Policy Engine 形成规则证据：" + "、".join(reasons) + "。"
+
+    @staticmethod
+    def _decision_fusion_summary(
+        action: str,
+        risk: str,
+        reasons: list[str],
+    ) -> str:
         if action == "allow":
-            return f"风险等级 {risk.upper()}，未命中阻断规则，允许工具执行。"
+            return f"综合三类风险证据，风险等级 {risk.upper()}，最终允许执行。"
         reason_text = "、".join(reasons) if reasons else "需要用户确认"
         if action == "ask":
-            return f"风险等级 {risk.upper()}，命中 {reason_text}，暂停执行并等待用户确认。"
-        return f"风险等级 {risk.upper()}，命中 {reason_text}，工具调用已阻断。"
+            return (
+                f"综合三类风险证据，风险等级 {risk.upper()}，命中 "
+                f"{reason_text}，最终要求人工确认。"
+            )
+        return (
+            f"综合三类风险证据，风险等级 {risk.upper()}，命中 "
+            f"{reason_text}，最终拒绝执行。"
+        )
 
     @staticmethod
     def _summarize(result: dict) -> str:

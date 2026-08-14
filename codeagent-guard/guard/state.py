@@ -71,6 +71,7 @@ class RuntimeStateStore:
                 "resolved_at": "TEXT",
                 "resolution_json": "TEXT NOT NULL DEFAULT '{}'",
                 "expires_at": "REAL NOT NULL DEFAULT 0",
+                "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
             })
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ct_trm_sources (
@@ -134,9 +135,9 @@ class RuntimeStateStore:
                     approval_id, trace_id, call_id, agent_id, task, tool,
                     args_json, source, tainted, allowed_tools_json, created_at,
                     execute_flag, conversation_id, status, resolved_at,
-                    resolution_json, expires_at
+                    resolution_json, expires_at, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
-                          NULL, '{}', ?)
+                          NULL, '{}', ?, ?)
                 ON CONFLICT(approval_id) DO UPDATE SET
                     trace_id=excluded.trace_id,
                     call_id=excluded.call_id,
@@ -153,7 +154,8 @@ class RuntimeStateStore:
                     status='pending',
                     resolved_at=NULL,
                     resolution_json='{}',
-                    expires_at=excluded.expires_at
+                    expires_at=excluded.expires_at,
+                    metadata_json=excluded.metadata_json
             """, (
                 approval_id,
                 call["trace_id"],
@@ -169,6 +171,7 @@ class RuntimeStateStore:
                 int(execute),
                 call.get("conversation_id"),
                 expires_at,
+                _json(call.get("metadata", {})),
             ))
             conn.commit()
 
@@ -382,4 +385,5 @@ class RuntimeStateStore:
             "resolved_at": row["resolved_at"],
             "resolution": json.loads(row["resolution_json"] or "{}"),
             "expires_at": float(row["expires_at"] or 0),
+            "metadata": json.loads(row["metadata_json"] or "{}"),
         }

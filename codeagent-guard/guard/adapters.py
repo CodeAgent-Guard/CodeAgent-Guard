@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import os
 from pathlib import Path
+import re
 import threading
 import uuid
 from typing import Any
@@ -145,7 +149,48 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         self.workspace = Path(workspace).resolve() if workspace else None
         self._request_lock = threading.RLock()
         self._authorization_cache: dict[tuple[str, str], dict] = {}
-        self._completed_calls: set[tuple[str, str]] = set()
+        self._authorized_calls: dict[tuple[str, str], dict] = {}
+
+    def reconcile_external_results(self, limit: int = 500) -> int:
+        """Repair keyed Trace events from committed external-result audits."""
+        audit_store = getattr(self.gateway, "audit", None)
+        if audit_store is None:
+            return 0
+        repaired = 0
+        for event in audit_store.list_events(limit):
+            if event.get("event_type") != "external_execution_result":
+                continue
+            call_id = str(event.get("call_id") or "")
+            evidence = event.get("result_evidence") or {}
+            if not call_id or not evidence or not event.get("result_fingerprint"):
+                continue
+            authorization = self._recover_authorization(
+                str(event.get("trace_id") or ""),
+                call_id,
+            )
+            if authorization is None or authorization.get("action") != "allow":
+                continue
+            result_key = f"opencode:{call_id}:external-result"
+            audit_key = f"opencode:{call_id}:external-result-audit"
+            before = (
+                self.transparency.find_event(event["trace_id"], result_key),
+                self.transparency.find_event(event["trace_id"], audit_key),
+            )
+            self._ensure_external_result_trace(
+                trace_id=event["trace_id"],
+                call_id=call_id,
+                authorization=authorization,
+                result_audit=event,
+                result_evidence=evidence,
+            )
+            after = (
+                self.transparency.find_event(event["trace_id"], result_key),
+                self.transparency.find_event(event["trace_id"], audit_key),
+            )
+            repaired += sum(
+                1 for old, new in zip(before, after) if old is None and new is not None
+            )
+        return repaired
 
     def authorize_tool(
         self,
@@ -163,10 +208,41 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         metadata = metadata or {}
         actual_call_id = call_id or f"call-{uuid.uuid4().hex[:12]}"
         cache_key = (trace_id, actual_call_id)
+        request_fingerprint = self._request_fingerprint(tool, args, metadata)
+        authorization_fingerprint = self._authorization_fingerprint(
+            tool=tool,
+            args=args,
+            task=task,
+            source=source,
+            tainted=tainted,
+            allowed_tools=allowed_tools,
+            metadata=metadata,
+        )
         with self._request_lock:
-            cached = self._authorization_cache.get(cache_key)
-            if cached is not None:
-                return copy.deepcopy(cached)
+            authorization = (
+                self._authorized_calls.get(cache_key)
+                or self._recover_authorization(trace_id, actual_call_id)
+            )
+            if authorization is not None:
+                authorization = self._refresh_final_authorization(
+                    trace_id,
+                    actual_call_id,
+                    authorization,
+                )
+                self._assert_authorization_matches(
+                    authorization,
+                    authorization_fingerprint,
+                    trace_id,
+                    actual_call_id,
+                )
+                self._authorized_calls[cache_key] = authorization
+                cached = self._authorization_cache.get(cache_key)
+                if (
+                    cached is not None
+                    and cached.get("action") == authorization.get("action")
+                ):
+                    return copy.deepcopy(cached)
+                return self._authorization_response(authorization)
             result = self._authorize_uncached(
                 trace_id=trace_id,
                 task=task,
@@ -177,10 +253,36 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 call_id=actual_call_id,
                 allowed_tools=allowed_tools,
                 metadata=metadata,
+                request_fingerprint=request_fingerprint,
+                authorization_fingerprint=authorization_fingerprint,
             )
             if len(self._authorization_cache) >= 1000:
                 self._authorization_cache.pop(next(iter(self._authorization_cache)))
             self._authorization_cache[cache_key] = copy.deepcopy(result)
+            self._authorized_calls[cache_key] = {
+                "fingerprint": request_fingerprint,
+                "authorization_fingerprint": authorization_fingerprint,
+                "raw_tool": tool,
+                "raw_args": copy.deepcopy(args),
+                "mapped_tool": result["opencode"]["policy_tool"],
+                "mapped_args": copy.deepcopy(
+                    result["opencode"]["policy_args"]
+                ),
+                "task": task,
+                "source": source,
+                "tainted": bool(tainted),
+                "conversation_id": str(
+                    metadata.get("session_id") or trace_id
+                ),
+                "action": result.get("action"),
+                "risk_level": result.get("risk_level"),
+                "reasons": list(result.get("reasons") or []),
+                "audit": copy.deepcopy(result.get("audit") or {}),
+                "approval_id": result.get("approval_id"),
+                "ct_trm": copy.deepcopy(result.get("ct_trm") or {}),
+            }
+            if len(self._authorized_calls) >= 1000:
+                self._authorized_calls.pop(next(iter(self._authorized_calls)))
             return result
 
     def _authorize_uncached(
@@ -195,19 +297,14 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         call_id: str,
         allowed_tools: list[str] | tuple[str, ...] | None,
         metadata: dict,
+        request_fingerprint: str,
+        authorization_fingerprint: str,
     ) -> dict:
         mapped_tool, mapped_args = self._map_tool(tool, args, metadata)
-        policy_args = {
-            **mapped_args,
-            "_opencode": {
-                "tool": tool,
-                "args": args,
-                **metadata,
-            },
-        }
+        execution_context = self._execution_context(args, metadata)
         result = self.gateway.authorize(ToolCall(
             tool=mapped_tool,
-            args=policy_args,
+            args=mapped_args,
             trace_id=trace_id,
             task=task,
             source=source,
@@ -222,6 +319,14 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             conversation_id=str(
                 metadata.get("session_id") or trace_id
             ),
+            metadata={
+                "integration": "opencode",
+                "raw_tool": tool,
+                "raw_arguments": args,
+                "execution_context": execution_context,
+                "request_fingerprint": request_fingerprint,
+                "authorization_fingerprint": authorization_fingerprint,
+            },
             call_id=call_id,
         ))
         result["opencode"] = {
@@ -243,37 +348,55 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         metadata: dict | None = None,
     ) -> dict:
         metadata = metadata or {}
-        actual_call_id = call_id or f"call-{uuid.uuid4().hex[:12]}"
+        if not call_id:
+            raise ValueError("OpenCode tool result requires call_id")
+        actual_call_id = str(call_id)
         cache_key = (trace_id, actual_call_id)
+        request_fingerprint = self._request_fingerprint(tool, args, metadata)
         with self._request_lock:
-            if cache_key in self._completed_calls:
-                return self.transparency.snapshot(trace_id)
-            snapshot = self._record_tool_result_uncached(
+            authorization = (
+                self._authorized_calls.get(cache_key)
+                or self._recover_authorization(trace_id, actual_call_id)
+            )
+            if authorization is None:
+                raise ValueError(
+                    "OpenCode tool result has no matching authorization"
+                )
+            self._assert_request_matches(
+                authorization,
+                request_fingerprint,
+                trace_id,
+                actual_call_id,
+            )
+            authorization = self._refresh_final_authorization(
+                trace_id,
+                actual_call_id,
+                authorization,
+            )
+            if authorization.get("action") != "allow":
+                raise ValueError(
+                    "OpenCode tool result is not backed by a final Allow decision"
+                )
+            self._authorized_calls[cache_key] = authorization
+            return self._record_tool_result_uncached(
                 trace_id=trace_id,
-                task=task,
-                tool=tool,
-                args=args,
+                authorization=authorization,
                 result=result,
                 call_id=actual_call_id,
-                metadata=metadata,
             )
-            if len(self._completed_calls) >= 1000:
-                self._completed_calls.clear()
-            self._completed_calls.add(cache_key)
-            return snapshot
 
     def _record_tool_result_uncached(
         self,
         *,
         trace_id: str,
-        task: str,
-        tool: str,
-        args: dict,
+        authorization: dict,
         result: Any,
         call_id: str,
-        metadata: dict,
     ) -> dict:
-        mapped_tool, mapped_args = self._map_tool(tool, args, metadata)
+        mapped_tool = str(authorization["mapped_tool"])
+        mapped_args = copy.deepcopy(authorization["mapped_args"])
+        raw_tool = str(authorization["raw_tool"])
+        result_fingerprint = self._external_result_fingerprint(result)
         result_payload = self._normalize_external_result(
             mapped_tool,
             mapped_args,
@@ -288,7 +411,103 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 mapped_tool,
                 result_payload,
             )
-        if output_scan and output_scan.get("finding_count"):
+        result_error = self._external_result_error(sanitized_result)
+        result_status = "error" if result_error else "success"
+        result_evidence = {
+            "tool": mapped_tool,
+            "external_tool": raw_tool,
+            "result": TransparencyService.redact(sanitized_result),
+            "dlp_scan": TransparencyService.redact(output_scan),
+            "execution_status": result_status,
+        }
+        audit_store = getattr(self.gateway, "audit", None)
+        if audit_store is None:
+            raise RuntimeError("OpenCode result recording requires an audit store")
+        existing = self._existing_result_audit(trace_id, call_id)
+        if existing is not None:
+            if existing.get("result_fingerprint") != result_fingerprint:
+                raise ValueError(
+                    "conflicting external execution result for "
+                    f"{trace_id}/{call_id}"
+                )
+            return self._ensure_external_result_trace(
+                trace_id=trace_id,
+                call_id=call_id,
+                authorization=authorization,
+                result_audit=existing,
+                result_evidence=existing.get("result_evidence") or result_evidence,
+            )
+
+        observer = getattr(policy, "observe_tool_result", None)
+        if observer is not None:
+            observer(
+                mapped_tool,
+                mapped_args,
+                sanitized_result,
+                "deny" if result_error else "allow",
+                trace_id=trace_id,
+                call_id=call_id,
+                conversation_id=str(
+                    authorization.get("conversation_id") or trace_id
+                ),
+                result_fingerprint=result_fingerprint,
+            )
+        result_audit = audit_store.append(
+            trace_id=trace_id,
+            task=str(authorization.get("task") or "OpenCode tool call"),
+            tool=mapped_tool,
+            args=TransparencyService.redact(mapped_args),
+            decision="allow",
+            risk_level=str(authorization.get("risk_level") or "low"),
+            reasons=(
+                list(authorization.get("reasons") or [])
+                if not result_error
+                else [
+                    *list(authorization.get("reasons") or []),
+                    "external_tool_execution_failed",
+                ]
+            ),
+            source=str(authorization.get("source") or "agent"),
+            tainted=bool(authorization.get("tainted", False)),
+            result_summary=TransparencyService.result_summary(sanitized_result),
+            latency_ms=0,
+            event_type="external_execution_result",
+            call_id=call_id,
+            execution_status=result_status,
+            result_fingerprint=result_fingerprint,
+            result_evidence=result_evidence,
+        )
+        return self._ensure_external_result_trace(
+            trace_id=trace_id,
+            call_id=call_id,
+            authorization=authorization,
+            result_audit=result_audit,
+            result_evidence=result_evidence,
+        )
+
+    def _ensure_external_result_trace(
+        self,
+        *,
+        trace_id: str,
+        call_id: str,
+        authorization: dict,
+        result_audit: dict,
+        result_evidence: dict,
+    ) -> dict:
+        mapped_tool = str(result_evidence.get("tool") or authorization["mapped_tool"])
+        raw_tool = str(
+            result_evidence.get("external_tool") or authorization["raw_tool"]
+        )
+        sanitized_result = result_evidence.get("result") or {}
+        output_scan = result_evidence.get("dlp_scan") or {}
+        result_status = str(
+            result_evidence.get("execution_status")
+            or result_audit.get("execution_status")
+            or "success"
+        )
+        if output_scan.get("finding_count"):
+            output_evidence = dict(output_scan)
+            output_evidence.pop("action", None)
             self.transparency.emit(
                 trace_id,
                 phase="dlp_scan",
@@ -300,37 +519,363 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 details={
                     "call_id": call_id,
                     "tool": mapped_tool,
-                    **output_scan,
+                    **output_evidence,
+                    "evidence_only": True,
                 },
-            )
-        observer = getattr(policy, "observe_tool_result", None)
-        if observer is not None:
-            observer(
-                mapped_tool,
-                mapped_args,
-                sanitized_result,
-                "allow",
-                trace_id=trace_id,
-                call_id=call_id,
-                conversation_id=str(metadata.get("session_id") or trace_id),
+                event_key=f"opencode:{call_id}:external-result-dlp",
             )
         self.transparency.emit(
             trace_id,
             phase="tool_result",
             actor=self.agent_id,
             label="OpenCode 工具执行结果",
-            status="success",
+            status=result_status,
             title=f"{mapped_tool} 返回结果",
             summary=TransparencyService.result_summary(sanitized_result),
             details={
                 "call_id": call_id,
                 "tool": mapped_tool,
-                "external_tool": tool,
+                "external_tool": raw_tool,
                 "result": sanitized_result,
                 "execution_delegated": True,
             },
+            event_key=f"opencode:{call_id}:external-result",
+        )
+        self.transparency.emit(
+            trace_id,
+            phase="audit_record",
+            actor="audit",
+            label="Audit & Hash Chain",
+            status="recorded",
+            title="OpenCode 执行结果已写入防篡改审计链",
+            summary=(
+                f"审计事件 #{result_audit['seq']} 记录了外部工具的"
+                "实际执行结果，并连接到前序哈希。"
+            ),
+            details={
+                "call_id": call_id,
+                "audit_seq": result_audit["seq"],
+                "audit_type": "external_execution_result",
+                "authorization_audit_seq": (
+                    authorization.get("audit") or {}
+                ).get("seq"),
+                "prev_hash": result_audit["prev_hash"],
+                "hash": result_audit["hash"],
+                "execution_status": result_status,
+            },
+            event_key=f"opencode:{call_id}:external-result-audit",
         )
         return self.transparency.snapshot(trace_id)
+
+    @staticmethod
+    def _external_result_error(result: Any) -> str:
+        if not isinstance(result, dict):
+            return ""
+        if result.get("error"):
+            return str(result["error"])
+        try:
+            raw_exit_code = result.get("exit_code")
+            exit_code = 0 if raw_exit_code in (None, "") else int(raw_exit_code)
+        except (TypeError, ValueError):
+            return "external tool returned an invalid exit code"
+        return (
+            str(result.get("stderr") or f"process exited with code {exit_code}")
+            if exit_code
+            else ""
+        )
+
+    @staticmethod
+    def _request_fingerprint(tool: str, args: dict, metadata: dict) -> str:
+        payload = {
+            "tool": str(tool).strip().lower(),
+            "args": args,
+            "directory": OpenCodeToolProxyAdapter._working_directory(
+                args,
+                metadata,
+            ),
+            "home": OpenCodeToolProxyAdapter._normalize_host_path(
+                str(metadata.get("home") or "")
+            ),
+            "session_id": str(metadata.get("session_id") or ""),
+        }
+        return OpenCodeToolProxyAdapter._json_fingerprint(payload)
+
+    @classmethod
+    def _authorization_fingerprint(
+        cls,
+        *,
+        tool: str,
+        args: dict,
+        task: str,
+        source: str,
+        tainted: bool,
+        allowed_tools: list[str] | tuple[str, ...] | None,
+        metadata: dict,
+    ) -> str:
+        effective_allowed = (
+            tuple(allowed_tools)
+            if allowed_tools is not None
+            else cls.DEFAULT_ALLOWED_POLICY_TOOLS
+        )
+        return cls._json_fingerprint({
+            "request_fingerprint": cls._request_fingerprint(tool, args, metadata),
+            "task": str(task),
+            "source": str(source),
+            "tainted": bool(tainted),
+            "allowed_tools": sorted(str(item) for item in effective_allowed),
+            "project": cls._normalize_host_path(str(metadata.get("project") or "")),
+            "worktree": cls._normalize_host_path(str(metadata.get("worktree") or "")),
+        })
+
+    @staticmethod
+    def _json_fingerprint(value: Any) -> str:
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    @classmethod
+    def _external_result_fingerprint(cls, result: Any) -> str:
+        if not isinstance(result, dict):
+            return cls._json_fingerprint(result)
+        payload = copy.deepcopy(result)
+        reported = str(payload.pop("_guard_result_fingerprint", ""))
+        if re.fullmatch(r"[0-9a-fA-F]{64}", reported):
+            return cls._json_fingerprint({
+                "reported_full_result_sha256": reported.lower(),
+                "received_result": payload,
+            })
+        return cls._json_fingerprint(payload)
+
+    @staticmethod
+    def _assert_request_matches(
+        authorization: dict,
+        fingerprint: str,
+        trace_id: str,
+        call_id: str,
+    ) -> None:
+        authorized = str(authorization.get("fingerprint") or "")
+        if not authorized or authorized != fingerprint:
+            raise ValueError(
+                "OpenCode call_id was reused with a different tool, "
+                f"arguments, or working directory: {trace_id}/{call_id}"
+            )
+
+    @staticmethod
+    def _assert_authorization_matches(
+        authorization: dict,
+        fingerprint: str,
+        trace_id: str,
+        call_id: str,
+    ) -> None:
+        authorized = str(
+            authorization.get("authorization_fingerprint") or ""
+        )
+        if not authorized or authorized != fingerprint:
+            raise ValueError(
+                "OpenCode call_id was reused with a different authorization "
+                f"context: {trace_id}/{call_id}"
+            )
+
+    @staticmethod
+    def _authorization_response(authorization: dict) -> dict:
+        return {
+            "trace_id": authorization.get("trace_id"),
+            "call_id": authorization.get("call_id"),
+            "action": authorization.get("action"),
+            "risk_level": authorization.get("risk_level"),
+            "reasons": list(authorization.get("reasons") or []),
+            "result": copy.deepcopy(authorization.get("result") or {}),
+            "audit": copy.deepcopy(authorization.get("audit") or {}),
+            "approval_id": authorization.get("approval_id"),
+            "execution_delegated": True,
+            "ct_trm": copy.deepcopy(authorization.get("ct_trm") or {}),
+            "opencode": {
+                "tool": authorization.get("raw_tool"),
+                "policy_tool": authorization.get("mapped_tool"),
+                "policy_args": copy.deepcopy(
+                    authorization.get("mapped_args") or {}
+                ),
+            },
+        }
+
+    def _existing_result_audit(
+        self,
+        trace_id: str,
+        call_id: str,
+    ) -> dict | None:
+        audit_store = getattr(self.gateway, "audit", None)
+        finder = getattr(audit_store, "find_event", None)
+        if finder is None:
+            return None
+        return finder(
+            trace_id=trace_id,
+            call_id=call_id,
+            event_type="external_execution_result",
+        )
+
+    def _recover_authorization(
+        self,
+        trace_id: str,
+        call_id: str,
+    ) -> dict | None:
+        snapshot = self.transparency.snapshot(trace_id)
+        metadata = snapshot.get("metadata", {})
+        if (
+            snapshot.get("agent_id") != self.agent_id
+            or metadata.get("integration") != "opencode"
+        ):
+            return None
+        events = [
+            event
+            for event in snapshot.get("events", [])
+            if event.get("details", {}).get("call_id") == call_id
+        ]
+        plan = next(
+            (event for event in events if event.get("phase") == "agent_plan"),
+            None,
+        )
+        policy_events = [
+            event for event in events if event.get("phase") == "policy_decision"
+        ]
+        fusion_events = [
+            event for event in events if event.get("phase") == "decision_fusion"
+        ]
+        audit_events = [
+            event
+            for event in events
+            if event.get("phase") == "audit_record"
+            and event.get("details", {}).get("audit_type")
+            != "external_execution_result"
+        ]
+        if plan is None or not policy_events or not audit_events:
+            return None
+        details = plan.get("details", {})
+        raw_tool = str(details.get("raw_tool") or details.get("tool") or "")
+        raw_args = details.get("raw_arguments")
+        if not isinstance(raw_args, dict):
+            raw_args = details.get("arguments") or {}
+        execution_context = details.get("execution_context") or {}
+        fingerprint = str(
+            details.get("request_fingerprint")
+            or metadata.get("request_fingerprint")
+            or ""
+        )
+        authorization_fingerprint = str(
+            details.get("authorization_fingerprint")
+            or metadata.get("authorization_fingerprint")
+            or ""
+        )
+        if (
+            not raw_tool
+            or not fingerprint
+            or not authorization_fingerprint
+        ):
+            return None
+        policy_event = policy_events[-1]
+        policy_details = policy_event.get("details", {})
+        # New traces assign the final Allow/Ask/Deny outcome exclusively to
+        # Decision Fusion.  Traces written by older releases do not contain
+        # that phase, so retain a strict fallback to their policy event.
+        if fusion_events:
+            decision_event = fusion_events[-1]
+            decision_details = decision_event.get("details", {})
+        else:
+            if policy_details.get("evidence_only"):
+                # A new-format policy evidence event without its subsequent
+                # fusion event is only a partial authorization trace.
+                return None
+            decision_event = policy_event
+            decision_details = policy_details
+        audit_event = audit_events[-1]
+        audit_details = audit_event.get("details", {})
+        audit_store = getattr(self.gateway, "audit", None)
+        audit_seq = audit_details.get("audit_seq")
+        getter = getattr(audit_store, "get_event", None)
+        audit_record = (
+            getter(int(audit_seq))
+            if getter is not None and audit_seq
+            else None
+        )
+        mapped_tool = str(
+            policy_details.get("tool") or details.get("tool") or ""
+        )
+        final_action = (
+            decision_details.get("decision")
+            or decision_event.get("status")
+        )
+        if (
+            audit_record is None
+            or audit_record.get("event_type") != "decision"
+            or audit_record.get("trace_id") != trace_id
+            or audit_record.get("call_id") != call_id
+            or audit_record.get("tool") != mapped_tool
+            or audit_record.get("decision") != final_action
+        ):
+            return None
+        return {
+            "trace_id": trace_id,
+            "call_id": call_id,
+            "fingerprint": fingerprint,
+            "authorization_fingerprint": authorization_fingerprint,
+            "raw_tool": raw_tool,
+            "raw_args": raw_args,
+            "mapped_tool": mapped_tool,
+            "mapped_args": copy.deepcopy(
+                policy_details.get("normalized_arguments")
+                or details.get("arguments")
+                or {}
+            ),
+            "task": snapshot.get("task") or "OpenCode tool call",
+            "source": details.get("source") or "agent",
+            "tainted": bool(details.get("tainted", False)),
+            "conversation_id": str(
+                metadata.get("session_id") or trace_id
+            ),
+            "action": final_action,
+            "risk_level": (
+                decision_details.get("risk_level")
+                or policy_details.get("risk_level")
+                or "low"
+            ),
+            "reasons": list(
+                decision_details.get("reasons")
+                or policy_details.get("matched_rules")
+                or []
+            ),
+            "audit": audit_record,
+            "approval_id": next(
+                (
+                    event.get("details", {}).get("approval_id")
+                    for event in reversed(events)
+                    if event.get("details", {}).get("approval_id")
+                ),
+                None,
+            ),
+            "ct_trm": {},
+        }
+
+    def _refresh_final_authorization(
+        self,
+        trace_id: str,
+        call_id: str,
+        authorization: dict,
+    ) -> dict:
+        recovered = self._recover_authorization(trace_id, call_id)
+        if recovered is None:
+            return authorization
+        if recovered.get("fingerprint") != authorization.get("fingerprint"):
+            raise ValueError("Stored OpenCode authorization fingerprint changed")
+        if (
+            recovered.get("authorization_fingerprint")
+            != authorization.get("authorization_fingerprint")
+        ):
+            raise ValueError("Stored OpenCode authorization context changed")
+        return recovered
 
     def _map_tool(
         self,
@@ -344,9 +889,24 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             return "run_command", {
                 "cmd": self._first(args, "cmd", "command", "script"),
                 "timeout": args.get("timeout", 10),
+                "cwd": self._working_directory(args, metadata),
             }
         if normalized == "read":
-            return "read_file", {"path": self._path(args, metadata)}
+            path = self._path(args, metadata)
+            try:
+                target = Path(path)
+                if self.workspace is not None and not target.is_absolute():
+                    target = self.workspace / target
+                is_directory = bool(path) and target.is_dir()
+            except OSError:
+                is_directory = False
+            if is_directory:
+                return "list_directory", {
+                    "path": path,
+                    "max_depth": 1,
+                    "include_hidden": True,
+                }
+            return "read_file", {"path": path}
         if normalized == "write":
             return "write_file", {
                 "path": self._path(args, metadata),
@@ -406,9 +966,31 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         result: Any,
     ) -> dict:
         if isinstance(result, dict):
-            payload = result
+            payload = copy.deepcopy(result)
         else:
             payload = {"output": result}
+        payload.pop("_guard_result_fingerprint", None)
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        error = cls._first(
+            payload,
+            "error",
+            default=metadata.get("error", ""),
+        )
+        exit_code = cls._first(
+            payload,
+            "exit_code",
+            "exitCode",
+            "code",
+            default=cls._first(
+                metadata,
+                "exit_code",
+                "exitCode",
+                "code",
+                default=None,
+            ),
+        )
         if tool == "read_file":
             content = cls._first_result_text(
                 payload,
@@ -418,35 +1000,61 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 "stdout",
                 "result",
             )
-            return {
+            normalized = {
                 "path": mapped_args.get("path", ""),
                 "content": cls._compact_result_text(content),
             }
+            if error:
+                normalized["error"] = cls._compact_result_text(error)
+            return normalized
         if tool == "run_command":
-            return {
+            normalized = {
                 "stdout": cls._compact_result_text(
                     cls._first_result_text(payload, "stdout", "output", "text")
                 ),
                 "stderr": cls._compact_result_text(
                     cls._first_result_text(payload, "stderr", "error")
                 ),
-                "exit_code": payload.get("exit_code", payload.get("code", 0)),
+                "exit_code": exit_code,
             }
+            if error:
+                normalized["error"] = cls._compact_result_text(error)
+            return normalized
         if tool == "http_request":
-            return {
+            status = cls._first(
+                payload,
+                "status",
+                "status_code",
+                default=cls._first(
+                    metadata,
+                    "status",
+                    "statusCode",
+                    "status_code",
+                    default=None,
+                ),
+            )
+            normalized = {
                 "url": mapped_args.get("url", ""),
-                "status": payload.get("status", payload.get("status_code", 200)),
+                "status": status,
                 "headers": payload.get("headers", {}),
                 "body": cls._compact_result_text(
                     cls._first_result_text(payload, "body", "text", "output", "result")
                 ),
             }
+            if error:
+                normalized["error"] = cls._compact_result_text(error)
+            return normalized
         if tool == "write_file":
-            return {
+            normalized = {
                 "path": mapped_args.get("path", ""),
-                "written": True,
+                "written": not bool(error),
                 "content": cls._compact_result_text(str(mapped_args.get("content", ""))),
             }
+            if error:
+                normalized["error"] = cls._compact_result_text(error)
+            return normalized
+        if error:
+            payload["error"] = cls._compact_result_text(error)
         return cls._compact_result(payload)
 
     @classmethod
@@ -503,41 +1111,77 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
         if not raw:
             return raw
         normalized = raw.replace("\\", "/")
-        if normalized.startswith("~"):
-            return raw
+        metadata = metadata or {}
 
-        direct = self._workspace_relative(raw)
+        if normalized.startswith("~"):
+            home = str(metadata.get("home") or "").strip()
+            if home and normalized in {"~", "~/"}:
+                normalized = home
+            elif home and normalized.startswith("~/"):
+                normalized = f"{home.rstrip('/')}/{normalized[2:]}"
+            else:
+                return raw
+
+        if not self._looks_absolute(normalized):
+            base = self._normalize_host_path(
+                self._working_directory({}, metadata)
+            )
+            if base and self._looks_absolute(base):
+                try:
+                    normalized = str(
+                        (Path(base).expanduser() / normalized).resolve(strict=False)
+                    )
+                except (OSError, RuntimeError):
+                    normalized = f"{base.rstrip('/')}/{normalized.lstrip('./')}"
+
+        direct = self._workspace_relative(normalized)
         if direct is not None:
             return direct
+        return normalized
 
-        suffix = self._demo_repo_suffix(normalized)
-        if suffix and self._workspace_path_exists(suffix):
-            return suffix
-
+    @classmethod
+    def _working_directory(cls, args: dict, metadata: dict | None = None) -> str:
         metadata = metadata or {}
-        for key in ("directory", "worktree", "project"):
-            base = str(metadata.get(key) or "")
-            if not base:
-                continue
-            base_normalized = base.replace("\\", "/").rstrip("/")
-            relative = self._string_relative(normalized, base_normalized)
-            if relative is None:
-                continue
-            if relative and self._workspace_path_exists(relative):
-                return relative
-            base_suffix = self._demo_repo_suffix(base_normalized)
-            if base_suffix and relative:
-                candidate = f"{base_suffix.rstrip('/')}/{relative}"
-                if self._workspace_path_exists(candidate):
-                    return candidate
+        for value in (
+            args.get("workdir"),
+            args.get("cwd"),
+            metadata.get("directory"),
+            metadata.get("worktree"),
+        ):
+            if value not in (None, ""):
+                return cls._normalize_host_path(str(value))
+        return ""
 
-        relative_base = self._metadata_demo_base(metadata)
-        if relative_base and not self._looks_absolute(normalized):
-            candidate = f"{relative_base.rstrip('/')}/{normalized.lstrip('./')}"
-            if self._workspace_path_exists(candidate):
-                return candidate
+    @staticmethod
+    def _normalize_host_path(value: str) -> str:
+        normalized = str(value or "").strip()
+        wsl_path = (
+            re.match(r"^/mnt/([A-Za-z])/(.*)$", normalized)
+            if os.name == "nt"
+            else None
+        )
+        if wsl_path:
+            drive = wsl_path.group(1).upper()
+            remainder = wsl_path.group(2).replace("/", "\\")
+            return f"{drive}:\\{remainder}"
+        windows_path = (
+            re.match(r"^([A-Za-z]):[\\/](.*)$", normalized)
+            if os.name != "nt"
+            else None
+        )
+        if windows_path:
+            drive = windows_path.group(1).lower()
+            remainder = windows_path.group(2).replace("\\", "/")
+            return f"/mnt/{drive}/{remainder}"
+        return normalized
 
-        return raw
+    @classmethod
+    def _execution_context(cls, args: dict, metadata: dict) -> dict:
+        context = {
+            "directory": cls._working_directory(args, metadata),
+            "worktree": str(metadata.get("worktree") or ""),
+        }
+        return {key: value for key, value in context.items() if value}
 
     def _workspace_relative(self, value: str) -> str | None:
         if self.workspace is None:

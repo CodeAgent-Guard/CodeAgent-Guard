@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 
 const DEFAULT_GUARD_URL = "http://127.0.0.1:8000";
 
@@ -15,7 +17,6 @@ const DEFAULT_ALLOWED_TOOLS = [
 ];
 
 const sessionPrompts = new Map();
-const sessionScenarios = new Map();
 const sessionTraceIds = new Map();
 const sessionMessageIds = new Map();
 const toolCallArgs = new Map();
@@ -82,24 +83,6 @@ function promptTextFromMessage(...values) {
   return "";
 }
 
-function videoScenarioFromPrompt(prompt) {
-  const text = String(prompt || "");
-  if (!text) return "";
-  if (/config\.ya?ml|review_required|approval_mode/i.test(text)) {
-    return "ask_config";
-  }
-  if (/bug-report|构建失败诊断|调试接口|debug endpoint|\.env\.demo|debug\.example\.com/i.test(text)) {
-    return "dlp_report";
-  }
-  if (/formatDate|失败用例|本地开发说明|Local troubleshooting|~\/\.ssh\/id_rsa|SSH 私钥|id_rsa/i.test(text)) {
-    return "readme_injection";
-  }
-  if (/package\.json|README\.md|安装命令|启动命令|测试命令|不要修改任何文件/i.test(text)) {
-    return "read_baseline";
-  }
-  return "";
-}
-
 function taskForSession(options, sessionID) {
   return (
     options.task ||
@@ -137,14 +120,39 @@ function compactResult(value, depth = 0) {
   return result;
 }
 
+function canonicalResult(value) {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map(canonicalResult);
+  if (typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map((key) => [key, canonicalResult(value[key])]),
+  );
+}
+
+function fullResultFingerprint(value) {
+  try {
+    return createHash("sha256")
+      .update(JSON.stringify(canonicalResult(value)))
+      .digest("hex");
+  } catch {
+    return createHash("sha256").update(String(value)).digest("hex");
+  }
+}
+
 function resultPayload(output) {
-  const candidate =
-    output?.result ??
-    output?.output ??
-    output?.content ??
-    output?.text ??
-    output;
-  return compactResult(candidate);
+  const full = !output || typeof output !== "object" ? output : {
+    title: output.title,
+    output: output.output,
+    metadata: output.metadata,
+    result: output.result,
+    content: output.content,
+    text: output.text,
+  };
+  const compact = compactResult(full);
+  return {
+    ...(compact && typeof compact === "object" ? compact : {output: compact}),
+    _guard_result_fingerprint: fullResultFingerprint(full),
+  };
 }
 
 function promptTextFromMessageLegacy(output) {
@@ -272,6 +280,20 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function postToolResultWithRetry(baseUrls, body, attempts = 4) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await postJsonAny(baseUrls, "/api/opencode/tool-result", body);
+    } catch (error) {
+      lastError = error;
+      if (error.retryable === false || attempt === attempts) throw error;
+      await sleep(250 * (2 ** (attempt - 1)));
+    }
+  }
+  throw lastError;
+}
+
 async function waitForApproval(baseUrl, approvalId, options) {
   const pollMs = Math.max(250, Number(options.approvalPollMs || 1000));
   const timeoutMs = Math.max(1000, Number(options.approvalTimeoutMs || 600000));
@@ -322,9 +344,7 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
         if (sessionMessageIds.get(sessionID) === messageID) return;
         sessionMessageIds.set(sessionID, messageID);
         sessionPrompts.set(sessionID, prompt);
-        const scenario = videoScenarioFromPrompt(prompt);
-        if (scenario) sessionScenarios.set(sessionID, scenario);
-        const suffix = `${sessionID}-${scenario || "task"}-${messageID}`;
+        const suffix = `${sessionID}-task-${messageID}`;
         sessionTraceIds.set(sessionID, cleanId(suffix, sessionID));
       }
     },
@@ -334,10 +354,6 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
       const callID = cleanId(input.callID, "call");
       const toolArgs = output.args || input?.args || {};
       const task = taskForSession(options, sessionID);
-      const videoScenario =
-        sessionScenarios.get(sessionID) ||
-        videoScenarioFromPrompt(task) ||
-        videoScenarioFromPrompt(JSON.stringify(toolArgs));
       toolCallArgs.set(`${sessionID}:${callID}`, toolArgs);
       const { baseUrl, payload: result } = await postJsonAny(
         baseUrls,
@@ -356,8 +372,8 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
             project: ctx.project,
             directory: ctx.directory,
             worktree: ctx.worktree,
+            home: homedir(),
             server_url: String(ctx.serverUrl),
-            video_scenario: videoScenario,
           },
         },
       );
@@ -385,14 +401,9 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
       const callKey = `${sessionID}:${callID}`;
       const toolArgs = output?.args || input?.args || toolCallArgs.get(callKey) || {};
       const task = taskForSession(options, sessionID);
-      const videoScenario =
-        sessionScenarios.get(sessionID) ||
-        videoScenarioFromPrompt(task) ||
-        videoScenarioFromPrompt(JSON.stringify(toolArgs));
       try {
-        await postJsonAny(
+        await postToolResultWithRetry(
           baseUrls,
-          "/api/opencode/tool-result",
           {
             tool: input.tool,
             args: toolArgs,
@@ -400,15 +411,15 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
             trace_id: traceIdForSession(sessionID),
             session_id: sessionID,
             call_id: callID,
-            task,
-            source: "agent",
-            agent_id: "opencode",
+          task,
+          source: "agent",
+          agent_id: "opencode",
             metadata: {
               project: ctx.project,
               directory: ctx.directory,
               worktree: ctx.worktree,
+              home: homedir(),
               server_url: String(ctx.serverUrl),
-              video_scenario: videoScenario,
             },
           },
         );

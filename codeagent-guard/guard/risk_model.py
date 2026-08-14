@@ -137,8 +137,35 @@ class CTTRMRiskModel:
         chain: ChainRiskAnalyzer,
     ) -> None:
         self.workspace = workspace.resolve()
+        self.trusted_workspace_roots: tuple[Path, ...] = ()
         self.tracker = tracker
         self.chain = chain
+
+    def set_trusted_workspace_roots(
+        self,
+        roots: list[Path] | tuple[Path, ...],
+    ) -> None:
+        self.trusted_workspace_roots = tuple(
+            Path(root).resolve(strict=False) for root in roots
+        )
+
+    @staticmethod
+    def _is_within(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def _within_trusted_scope(self, metadata: dict) -> bool:
+        raw = metadata.get("absolute_path")
+        if not raw:
+            return False
+        path = Path(str(raw)).resolve(strict=False)
+        return any(
+            self._is_within(path, root)
+            for root in self.trusted_workspace_roots
+        )
 
     def assess_tool_call(
         self,
@@ -309,7 +336,7 @@ class CTTRMRiskModel:
         )):
             score = 10
             reason = "工作区配置文件"
-        elif not metadata.get("within_workspace", True):
+        elif not metadata.get("within_workspace", True) and not self._within_trusted_scope(metadata):
             score = 20
             reason = "未知外部文件"
         else:
@@ -380,7 +407,7 @@ class CTTRMRiskModel:
         if not path:
             return
         normalized, metadata = self.tracker.normalize_path(path)
-        if metadata.get("within_workspace", True):
+        if metadata.get("within_workspace", True) or self._within_trusted_scope(metadata):
             score = 0
         elif metadata.get("sensitive"):
             score = 35

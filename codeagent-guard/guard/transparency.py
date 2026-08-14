@@ -33,6 +33,7 @@ class TransparencyService:
         self.db_path = db_path
         self._events: dict[str, list[dict]] = {}
         self._meta: dict[str, dict] = {}
+        self._event_keys: dict[str, dict[str, dict]] = {}
         self._lock = threading.RLock()
         if self.db_path is not None:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +80,9 @@ class TransparencyService:
                 self._trim()
 
     def emit(self, trace_id: str, *, phase: str, actor: str, label: str,
-             status: str, title: str, summary: str, details: dict | None = None) -> dict:
+             status: str, title: str, summary: str, details: dict | None = None,
+             event_key: str | None = None) -> dict:
+        stable_event_key = str(event_key or "")
         with self._lock:
             if self.db_path is not None:
                 if not self._trace_exists(trace_id):
@@ -90,6 +93,18 @@ class TransparencyService:
                     )
                 timestamp = datetime.now(timezone.utc).isoformat()
                 with closing(self._connect()) as conn:
+                    # Keep the idempotency lookup and sequence allocation in one
+                    # write transaction across all service instances.
+                    conn.execute("BEGIN IMMEDIATE")
+                    if stable_event_key:
+                        existing = conn.execute(
+                            "SELECT * FROM trace_events "
+                            "WHERE trace_id=? AND event_key=? LIMIT 1",
+                            (trace_id, stable_event_key),
+                        ).fetchone()
+                        if existing is not None:
+                            conn.commit()
+                            return self._event_row(existing)
                     row = conn.execute(
                         "SELECT COALESCE(MAX(seq), 0) AS seq "
                         "FROM trace_events WHERE trace_id=?",
@@ -105,13 +120,14 @@ class TransparencyService:
                         "title": title,
                         "summary": str(summary)[:4000],
                         "details": self.redact(details or {}),
+                        "event_key": stable_event_key,
                     }
                     conn.execute(
                         """
                         INSERT INTO trace_events (
                             trace_id, seq, timestamp, phase, actor, label,
-                            status, title, summary, details_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            status, title, summary, details_json, event_key
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             trace_id,
@@ -128,6 +144,7 @@ class TransparencyService:
                                 ensure_ascii=False,
                                 sort_keys=True,
                             ),
+                            event["event_key"],
                         ),
                     )
                     conn.execute(
@@ -138,6 +155,10 @@ class TransparencyService:
                 return event
             if trace_id not in self._events:
                 self.begin(trace_id, task="外部 Agent 工具调用", agent_id=actor)
+            if stable_event_key:
+                existing = self._event_keys.get(trace_id, {}).get(stable_event_key)
+                if existing is not None:
+                    return existing
             event = {
                 "seq": len(self._events[trace_id]) + 1,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -148,9 +169,28 @@ class TransparencyService:
                 "title": title,
                 "summary": str(summary)[:4000],
                 "details": self.redact(details or {}),
+                "event_key": stable_event_key,
             }
             self._events[trace_id].append(event)
+            if stable_event_key:
+                self._event_keys.setdefault(trace_id, {})[stable_event_key] = event
             return event
+
+    def find_event(self, trace_id: str, event_key: str) -> dict | None:
+        """Return an event by its non-empty, trace-local stable key."""
+        stable_event_key = str(event_key or "")
+        if not stable_event_key:
+            return None
+        with self._lock:
+            if self.db_path is not None:
+                with closing(self._connect()) as conn:
+                    row = conn.execute(
+                        "SELECT * FROM trace_events "
+                        "WHERE trace_id=? AND event_key=? LIMIT 1",
+                        (trace_id, stable_event_key),
+                    ).fetchone()
+                return self._event_row(row) if row is not None else None
+            return self._event_keys.get(trace_id, {}).get(stable_event_key)
 
     def snapshot(self, trace_id: str) -> dict:
         with self._lock:
@@ -237,9 +277,10 @@ class TransparencyService:
         if isinstance(value, dict):
             return {
                 key: ("[REDACTED]" if re.search(
-                    r"(?i)(api[_-]?key|token|password|authorization|secret)",
+                    r"(?i)(api[_-]?key|token|password|secret)",
                     str(key),
-                ) else cls.redact(item))
+                ) and not str(key).lower().endswith("_fingerprint")
+                else cls.redact(item))
                 for key, item in value.items()
             }
         if isinstance(value, list):
@@ -275,6 +316,7 @@ class TransparencyService:
             oldest = next(iter(self._events))
             self._events.pop(oldest, None)
             self._meta.pop(oldest, None)
+            self._event_keys.pop(oldest, None)
 
     def _connect(self) -> sqlite3.Connection:
         if self.db_path is None:
@@ -308,11 +350,21 @@ class TransparencyService:
                     title TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     details_json TEXT NOT NULL,
+                    event_key TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (trace_id, seq),
                     FOREIGN KEY (trace_id) REFERENCES trace_meta(trace_id)
                         ON DELETE CASCADE
                 )
             """)
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(trace_events)").fetchall()
+            }
+            if "event_key" not in columns:
+                conn.execute(
+                    "ALTER TABLE trace_events "
+                    "ADD COLUMN event_key TEXT NOT NULL DEFAULT ''"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trace_meta_updated "
                 "ON trace_meta(updated_at)"
@@ -320,6 +372,10 @@ class TransparencyService:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trace_events_time "
                 "ON trace_events(timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trace_events_event_key "
+                "ON trace_events(trace_id, event_key) WHERE event_key <> ''"
             )
             conn.commit()
 
@@ -370,4 +426,5 @@ class TransparencyService:
             "title": row["title"],
             "summary": row["summary"],
             "details": json.loads(row["details_json"]),
+            "event_key": row["event_key"],
         }

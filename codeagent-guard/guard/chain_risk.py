@@ -71,8 +71,14 @@ class ChainRiskAnalyzer:
         trace_id: str,
         *,
         taint_matches: list[TaintMatch] | None = None,
+        result_key: str | None = None,
     ) -> ChainState:
         state = self._state(trace_id)
+        if result_key and any(
+            step.get("result_key") == result_key
+            for step in state.recent_steps
+        ):
+            return state
         now = time.time()
         step = {
             "tool": tool_name,
@@ -80,6 +86,7 @@ class ChainRiskAnalyzer:
             "decision": decision,
             "result_error": bool(result.get("error")),
             "timestamp": now,
+            **({"result_key": result_key} if result_key else {}),
         }
         state.recent_steps.append(step)
         state.recent_steps = state.recent_steps[-self.max_recent_steps:]

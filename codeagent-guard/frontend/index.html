@@ -4,451 +4,223 @@
   <meta charset="UTF-8">
   <link rel="icon" href="data:,">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CodeAgent Guard</title>
+  <title>CodeAgent Guard · 工具调用安全网关</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="shell">
+  <div class="app-shell">
     <aside class="sidebar" aria-label="主导航">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true"><span></span></div>
-        <div>
-          <strong>CodeAgent Guard</strong>
-          <small>Tool-call Risk Gateway</small>
-        </div>
+        <span class="brand-mark" aria-hidden="true">CG</span>
+        <div><strong>CodeAgent Guard</strong><small>工具调用安全网关</small></div>
       </div>
+
       <nav>
-        <button class="nav active" data-view="dashboard"><i>01</i><span>系统总览</span></button>
-        <button class="nav" data-view="agent"><i>02</i><span>Agent 控制台</span></button>
-        <button class="nav" data-view="audit"><i>03</i><span>审计日志</span></button>
-        <button class="nav" data-view="policies"><i>04</i><span>策略中心</span></button>
+        <button class="nav active" data-view="dashboard" aria-current="page"><span>总览</span><small>运行态</small></button>
+        <button class="nav" data-view="agent"><span>Agent 控制台</span><small>主演示</small></button>
+        <button class="nav" data-view="audit"><span>审计日志</span><small>证据链</small></button>
+        <button class="nav" data-view="policies"><span>生效策略</span><small>只读</small></button>
       </nav>
-      <div class="system-state">
-        <div class="pulse"></div>
-        <div>
-          <strong>Gateway Online</strong>
-          <small id="workspace-label">Workspace isolated</small>
-        </div>
+
+      <div class="gateway-state loading" id="gateway-state">
+        <i aria-hidden="true"></i>
+        <div><strong>正在连接网关</strong><small id="workspace-label">工作区读取中</small></div>
       </div>
-      <div class="sidebar-foot" id="build-label">正在读取构建版本…</div>
+      <div class="build-label" id="build-label">构建版本读取中</div>
     </aside>
 
     <main>
       <header class="topbar">
-        <div>
-          <h1 id="page-title">系统总览</h1>
-        </div>
+        <div><h1 id="page-title">系统总览</h1><p id="page-subtitle">工具调用安全网关的实时状态</p></div>
         <div class="header-actions">
-          <div class="llm-state" id="llm-state"><span></span><b>LLM 检测中</b></div>
-          <button class="icon-button" id="refresh" title="刷新" aria-label="刷新">↻</button>
-          <div class="avatar" aria-hidden="true">CG</div>
+          <span class="llm-state loading" id="llm-state"><i></i><b>LLM 状态读取中</b></span>
+          <button class="icon-button" id="refresh" type="button" aria-label="刷新当前数据" title="刷新">↻</button>
         </div>
       </header>
 
-      <section id="dashboard" class="view active">
-        <section class="hero panel-plain">
-          <div class="hero-media" aria-hidden="true">
-            <video class="hero-video" src="/assets/hero-loop.mp4" muted autoplay loop playsinline></video>
-            <div class="hero-fallback">
-              <span></span><span></span><span></span><span></span>
-            </div>
-            <div class="hero-overlay"></div>
+      <div class="data-status" id="data-status" role="status" aria-live="polite" hidden></div>
+
+      <section id="view-dashboard" data-view-id="dashboard" class="view active" aria-labelledby="page-title">
+        <section class="runtime-strip panel" aria-label="网关运行状态">
+          <div class="runtime-primary">
+            <span class="status-dot loading" id="runtime-dot" aria-hidden="true"></span>
+            <div><small>网关状态</small><strong id="runtime-status">正在连接</strong></div>
           </div>
-          <div class="hero-content">
-            <h2>Agent 工具调用边界控制与风险审计</h2>
-            <p class="hero-copy">
-              统一接管 Agent / OpenCode 的工具调用，结合 Policy Engine、CT-TRM 风险分析、审批闭环与
-              Audit Hash Chain，把每一次 Allow / Ask / Deny 变成可解释、可回放、可验证的系统事件。
-            </p>
-            <div class="hero-tags">
-              <span>OpenCode Adapter</span>
-              <span>CT-TRM</span>
-              <span>Evidence-based Approval</span>
-              <span>Tamper-evident Audit</span>
-            </div>
-          </div>
-          <div class="hero-metrics metrics">
-            <article class="metric">
-              <div class="metric-icon blue">↳</div>
-              <div><span>Total Tool Calls</span><strong id="metric-calls">0</strong><small>统一受控入口</small></div>
-            </article>
-            <article class="metric">
-              <div class="metric-icon red">!</div>
-              <div><span>Risk Interventions</span><strong id="metric-blocked">0</strong><small id="metric-rate">阻断率 0%</small></div>
-            </article>
-            <article class="metric">
-              <div class="metric-icon amber">?</div>
-              <div><span>Pending Approvals</span><strong id="metric-approvals">0</strong><small>等待显式确认</small></div>
-            </article>
-            <article class="metric">
-              <div class="metric-icon teal">CT</div>
-              <div><span>CT-TRM Findings</span><strong id="metric-ct-findings">0</strong><small>风险证据链</small></div>
-            </article>
-            <article class="metric">
-              <div class="metric-icon green">✓</div>
-              <div><span>Audit Integrity</span><strong id="metric-chain">VALID</strong><small id="chain-count">0 个事件已校验</small></div>
-            </article>
-            <article class="metric">
-              <div class="metric-icon sky">ms</div>
-              <div><span>Demo Session Avg</span><strong><b id="metric-latency">0</b><em>ms</em></strong><small>当前演示会话</small></div>
-            </article>
-          </div>
+          <div><small>当前工作区</small><code id="runtime-workspace">读取中</code></div>
+          <div><small>最近 Trace</small><code id="runtime-trace">暂无记录</code></div>
+          <div><small>数据范围</small><strong>全部审计库</strong><em>实时汇总</em></div>
+          <button class="primary" type="button" data-jump="agent">进入主演示</button>
         </section>
 
-        <article class="panel latest-task-panel">
-          <div><span>TRACE ID</span><b id="latest-trace-id">暂无任务</b></div>
-          <div><span>用户任务</span><b id="latest-task-name">等待执行</b></div>
-          <div><span>当前 ToolCall</span><b id="latest-tool-call">—</b></div>
-          <div><span>最终执行状态</span><b id="latest-execution-status">—</b></div>
-          <div><span>风险等级</span><b id="latest-risk">LOW</b></div>
-          <div><span>工具调用 / 阻断</span><b id="latest-call-count">0 / 0</b></div>
-        </article>
-
-        <article class="panel flow-panel">
-          <div class="panel-head">
-            <div><h2>风险证据融合与授权决策链路</h2></div>
-          </div>
-          <div class="flow report-aligned-flow" id="control-flow">
-            <div class="flow-node active"><span>01</span><i>TC</i><b>ToolCall</b><small>tool + args</small></div>
-            <div class="flow-line"><em></em></div>
-            <div class="flow-node"><span>02</span><i>PE</i><b>Policy Engine</b><small>rules</small></div>
-            <div class="flow-line"><em></em></div>
-            <div class="flow-node"><span>03</span><i>CT</i><b>CT-TRM</b><small>source + taint</small></div>
-            <div class="flow-line"><em></em></div>
-            <div class="flow-node dlp-node"><span>04</span><i>DLP</i><b>DLP</b><small>mask + finding</small></div>
-            <div class="flow-line"><em></em></div>
-            <div class="flow-node evidence-node"><span>05</span><i>BC</i><b>Budget / Chain</b><small>scope + chain risk</small></div>
-            <div class="flow-line guarded"><em></em><label>evidence fusion</label></div>
-            <div class="flow-node shield"><span>06</span><i>DF</i><b>Decision Fusion</b><small>allow / ask / deny</small></div>
-            <div class="flow-line"><em></em></div>
-            <div class="flow-node"><span>07</span><i>TP</i><b>Tool Proxy</b><small>execute or block</small></div>
-            <div class="flow-line"><em></em></div>
-            <div class="flow-node audit-node"><span>08</span><i>AU</i><b>Trace / Audit</b><small>hash verified</small></div>
-          </div>
-          <div class="tool-strip">
-            <span>read_file</span><span>write_file</span><span>run_command</span>
-            <span>http_request</span><span>send_email</span><span>search_files</span>
-            <span>delete_path</span><span>move_path</span><span>open_directory</span>
-          </div>
-        </article>
-
-        <article class="panel preflight-review-panel">
-            <div class="panel-head">
-              <div>
-                <h2>执行前工具调用审查链路</h2>
-              <small class="review-subtitle">每个模块输出结构化证据，Decision Fusion 根据证据强度输出 Allow / Ask / Deny。</small>
+        <div class="overview-grid">
+          <section class="panel current-call-panel">
+            <div class="section-head">
+              <div><span class="section-kicker">最近一次真实记录</span><h2>ToolCall 与最终状态</h2></div>
+              <span class="decision-badge pending" id="overview-decision">读取中</span>
             </div>
-            <span class="shot-status">ALLOW / ASK / DENY</span>
-          </div>
-          <div class="shot-loop">
-            <section class="shot-toolcall">
-              <div class="shot-title"><span>01</span><b>审查对象（ToolCall）</b></div>
-              <div class="toolcall-card">
-                <div><small>tool</small><strong>read_file</strong></div>
-                <div><small>path</small><strong>~/.ssh/id_rsa</strong></div>
-                <div><small>source</small><strong>README.md</strong></div>
-                <div><small>user intent</small><strong>fix failed tests</strong></div>
-                <div><small>budget</small><strong>read_only project task</strong></div>
-                <div><small>requested_by</small><strong>Agent via OpenCode</strong></div>
-              </div>
-              <p class="shot-note">将 OpenCode / Agent 的原生工具请求统一转换为结构化 ToolCall，再进入策略、CT-TRM、DLP 和审计链路。</p>
-              <div class="shot-mini-timeline" aria-label="风险传播时间线">
-                <span>Task</span>
-                <i></i>
-                <span>Source</span>
-                <i></i>
-                <span>Args</span>
-                <i></i>
-                <span class="deny">Decision</span>
-              </div>
-            </section>
+            <div id="overview-current" class="current-call empty-state">正在读取最近一次 Transparency Trace…</div>
+          </section>
 
-            <section class="shot-evidence">
-              <div class="shot-title"><span>02</span><b>证据生成（Evidence Pipeline）</b></div>
-              <div class="shot-evidence-grid">
-                <article class="shot-card danger">
-                  <small>Policy Engine</small>
-                  <p><b>Input</b><span>tool + path</span></p>
-                  <p><b>Evidence</b><span>sensitive_path / credential_file / hard_deny</span></p>
-                  <p><b>Impact</b><span>force Deny</span></p>
-                  <em>强制拒绝</em>
-                </article>
-                <article class="shot-card warn">
-                  <small>CT-TRM</small>
-                  <p><b>Input</b><span>source + argument</span></p>
-                  <p><b>Evidence</b><span>low_trust_source / README.md → path / P1</span></p>
-                  <p><b>Impact</b><span>raise risk level</span></p>
-                  <em>提高风险</em>
-                </article>
-                <article class="shot-card dlp">
-                  <small>DLP</small>
-                  <p><b>Input</b><span>params + tool output</span></p>
-                  <p><b>Evidence</b><span>no output because blocked before execution</span></p>
-                  <p><b>Capability</b><span>mask secret / HMAC fingerprint</span></p>
-                  <em>防止泄漏</em>
-                </article>
-                <article class="shot-card warn">
-                  <small>Task Budget</small>
-                  <p><b>Input</b><span>user intent + action</span></p>
-                  <p><b>Evidence</b><span>fix tests ≠ SSH private key access</span></p>
-                  <p><b>Impact</b><span>no budget reduction</span></p>
-                  <em>取消预算折减</em>
-                </article>
-                <article class="shot-card danger">
-                  <small>Chain Risk</small>
-                  <p><b>Input</b><span>history + current action</span></p>
-                  <p><b>Evidence</b><span>sensitive read attempt, no prior external sink</span></p>
-                  <p><b>Impact</b><span>mark as chain-risk source</span></p>
-                  <em>链路风险起点</em>
-                </article>
-              </div>
-            </section>
+          <section class="panel overview-facts-panel">
+            <div class="section-head"><div><span class="section-kicker">可追溯统计</span><h2>运行态摘要</h2></div></div>
+            <div class="fact-grid">
+              <div><small>工具调用</small><strong id="metric-calls">—</strong><em>全部审计库</em></div>
+              <div><small>待审批</small><strong id="metric-approvals">—</strong><em>当前待处理队列</em></div>
+              <div><small>Deny 记录</small><strong id="metric-denied">—</strong><em>全部审计库</em></div>
+              <div><small>策略平均耗时</small><strong><span id="metric-latency">—</span><i> ms</i></strong><em>全部审计库</em></div>
+            </div>
+            <div class="integrity-line unknown" id="overview-integrity">
+              <i aria-hidden="true">?</i>
+              <div><b>审计链状态读取中</b><span>校验结论来自后端全局 Hash Chain</span></div>
+            </div>
+          </section>
 
-            <section class="shot-decision">
-              <div class="shot-title"><span>03</span><b>融合处置（Decision Fusion）</b></div>
-              <div class="fusion-result">
-                <small>This ToolCall</small>
-                <code>Policy hard_deny</code>
-                <code>+ CT tainted_path</code>
-                <code>+ Budget mismatch</code>
-                <strong>= DENY / CRITICAL</strong>
-              </div>
-              <div class="decision-board">
-                <div><small>Allow</small><strong>低风险且任务范围匹配</strong></div>
-                <div><small>Ask</small><strong>灰区操作冻结参数等待确认</strong></div>
-                <div><small>Deny</small><strong>硬拒绝或高风险组合阻断</strong></div>
-                <div><small>Boundary</small><strong>邻界分数按业务语义校正</strong></div>
-              </div>
-            </section>
-
-            <section class="shot-audit">
-              <div class="shot-title"><span>04</span><b>审计留痕（Trace / Audit）</b></div>
-              <div class="audit-board">
-                <div><small>Trace ID</small><strong>trace-demo-ssh-read</strong></div>
-                <div><small>Prev Hash</small><strong>7a91c0e2...84bf19aa</strong></div>
-                <div><small>Event Hash</small><strong>f23d4ab9...c6e02d71</strong></div>
-                <div><small>Integrity</small><strong>Verified</strong></div>
-                <div><small>Execution</small><strong>not executed</strong></div>
-                <div><small>Reason</small><strong>blocked before tool execution</strong></div>
-                <div><small>Timestamp</small><strong>2026-07-02 11:26:14</strong></div>
-              </div>
-            </section>
-          </div>
-        </article>
-
-        <div class="dashboard-status-grid">
-            <article class="panel approvals-panel">
-              <div class="panel-head">
-                <div><h2>待审批事务</h2></div>
-                <span class="tag approval-count" id="approval-count">0</span>
-              </div>
-              <div id="pending-approvals" class="pending-approvals empty-state">
-                当前没有等待审批的操作
-              </div>
-            </article>
-
-            <article class="panel risk-panel">
-              <div class="panel-head">
-                <div><h2>风险模式统计</h2></div>
-              </div>
-              <div class="risk-content">
-                <div class="donut" id="risk-donut"><div><strong id="risk-total">0</strong><span>EVENTS</span></div></div>
-                <div id="risk-legend" class="risk-legend"></div>
-              </div>
-              <div class="tool-bars" id="tool-bars"></div>
-            </article>
-
-            <article class="panel audit-health-panel">
-              <div class="panel-head">
-                <div><h2>审计链与恢复能力</h2></div>
-                <span class="tag" id="home-audit-status">VALID</span>
-              </div>
-              <div class="chain-visual" aria-label="Audit Hash Chain 状态">
-                <span><b>01</b><small>Append</small></span>
-                <span><b>02</b><small>Hash</small></span>
-                <span><b>03</b><small>Verify</small></span>
-                <span><b>04</b><small>Replay</small></span>
-              </div>
-              <div class="recovery-list">
-                <div><b>Audit Hash Chain</b><small id="home-audit-events">0 个事件已校验</small></div>
-                <div><b>State Persistence</b><small>对话、审批、Trace 可在刷新后恢复</small></div>
-                <div><b>Trusted Workspaces</b><small id="home-workspace-status">项目策略继承</small></div>
-              </div>
-            </article>
+          <section class="panel recent-risk-panel">
+            <div class="section-head"><div><span class="section-kicker">最近事件</span><h2>高风险调用</h2></div><button class="text-button" type="button" data-jump="audit">查看审计</button></div>
+            <div id="recent-risks" class="risk-list empty-state">正在读取审计记录…</div>
+          </section>
         </div>
 
+        <section class="panel compact-pipeline-panel">
+          <div class="section-head">
+            <div><span class="section-kicker">统一技术叙事</span><h2>一次工具调用的安全闭环</h2></div>
+            <small>概念链路；实际事件顺序可在 Transparency Trace 中核对</small>
+          </div>
+          <div class="compact-pipeline" aria-label="工具调用安全处理链路">
+            <div><b>异构调用</b><span>Agent / OpenCode</span></div><i>→</i>
+            <div><b>统一 ToolCall</b><span>tool + args</span></div><i>→</i>
+            <div class="semantic"><b>参数安全语义重构</b><span>对象 · 行为 · 副作用</span></div><i>→</i>
+            <div><b>风险证据</b><span>Policy · CT-TRM · DLP</span></div><i>→</i>
+            <div><b>Decision Fusion</b><span>Allow · Ask · Deny</span></div><i>→</i>
+            <div><b>受控执行</b><span>执行 / 暂停 / 阻断</span></div><i>→</i>
+            <div><b>Trace / Audit</b><span>记录 · 哈希校验</span></div>
+          </div>
+        </section>
       </section>
 
-      <section id="agent" class="view">
-        <div class="agent-layout">
-          <article class="panel model-panel">
-            <div class="panel-head">
-              <div><h2>大模型接入配置</h2></div>
-              <span class="tag" id="provider-status">演示模式</span>
-            </div>
-            <div class="model-form">
-              <label><span>供应商</span><select id="provider-select"></select></label>
-              <label><span>Base URL</span><input id="provider-url" placeholder="https://..."></label>
-              <label><span>模型名称</span><input id="provider-model" list="provider-models" placeholder="model-id"><datalist id="provider-models"></datalist></label>
-              <label><span>API Key</span><input id="provider-key" type="password" placeholder="仅保存在当前进程内存"></label>
-              <div class="model-actions">
-                <small id="provider-note">选择一个供应商预设</small>
-                <button class="secondary" id="save-provider">应用配置</button>
-                <button class="primary" id="test-provider">测试连接</button>
-              </div>
+      <section id="view-agent" data-view-id="agent" class="view" aria-labelledby="page-title">
+        <section class="security-workbench" id="security-workbench" aria-label="ToolCall 安全闭环工作台">
+          <article class="workbench-column call-column panel">
+            <div class="column-head"><span>01</span><div><small>任务与调用</small><h2>Agent 提出了什么动作</h2></div></div>
+            <div id="task-summary" class="task-summary empty-state">请从最近 Trace 选择一次调用，或在下方“Agent 任务与设置”中运行任务。</div>
+            <div class="call-timeline" id="call-timeline"></div>
+            <div class="history-block">
+              <div class="mini-head"><b>最近 Trace</b><input id="history-search" aria-label="搜索历史 Trace" placeholder="搜索任务或 Trace"></div>
+              <div id="trace-history" class="trace-history empty-state">正在读取历史记录…</div>
             </div>
           </article>
 
-          <article class="panel workspace-panel">
-            <div class="panel-head">
-              <div><h2>可信工作环境</h2></div>
-              <span class="tag" id="trusted-workspace-count">0</span>
-            </div>
-            <div class="trusted-workspace-control">
-              <label>
-                <span>目录绝对路径</span>
-                <input id="trusted-workspace-path" placeholder="例如：demo-repo/workspace">
-              </label>
-              <button class="secondary" id="choose-trusted-workspace">选择目录</button>
-              <button class="primary" id="add-trusted-workspace">设为可信</button>
-            </div>
-            <div id="trusted-workspace-list" class="trusted-workspace-list empty-state">
-              暂无额外可信工作环境
-            </div>
+          <article class="workbench-column evidence-column panel">
+            <div class="column-head"><span>02</span><div><small>参数与证据</small><h2>动作实际指向什么</h2></div></div>
+            <div id="toolcall-detail" class="toolcall-detail empty-state">等待 ToolCall</div>
+            <section class="semantic-panel" id="semantic-panel">
+              <div class="semantic-title"><div><b>参数安全语义重构</b><span>确定性解析｜提取行为语义，不直接输出裁决</span></div></div>
+              <div class="semantic-grid">
+                <div><small>访问对象</small><strong id="semantic-object">—</strong></div>
+                <div><small>操作行为</small><strong id="semantic-action">—</strong></div>
+                <div><small>可能影响</small><strong id="semantic-effect">—</strong></div>
+              </div>
+            </section>
+            <div id="provenance-panel" class="provenance-panel empty-state">来源与污染路径将在这里显示。</div>
+            <div id="evidence-panel" class="evidence-panel"></div>
           </article>
 
-          <article class="panel history-panel">
-            <div class="panel-head">
-              <div><h2>上下文与旧对话</h2></div>
-              <span class="tag" id="history-count">0</span>
-              <button class="side-toggle" data-toggle-side="history">收起</button>
+          <article class="workbench-column decision-column panel">
+            <div class="column-head"><span>03</span><div><small>裁决与执行</small><h2>最终有没有执行</h2></div></div>
+            <div id="decision-panel" class="decision-panel pending">
+              <small>Decision Fusion</small><strong>等待 ToolCall</strong><p>最终裁决将显示在这里。</p>
             </div>
-            <div class="history-filter">
-              <input id="history-search" placeholder="搜索旧对话">
-            </div>
-            <div id="agent-history" class="agent-history empty-state">
-              暂无 Agent 对话记录
-            </div>
+            <div id="execution-panel" class="execution-panel empty-state">执行状态读取中</div>
+            <div id="approval-panel" class="approval-panel" hidden></div>
+            <div id="record-panel" class="record-panel empty-state">Trace 与审计状态读取中</div>
           </article>
+        </section>
 
-          <article class="panel console-panel">
-            <div class="panel-head">
-              <div><h2>Agent 任务控制台</h2></div>
-              <button class="secondary" id="new-agent-context">新建上下文</button>
-            </div>
-            <div class="context-panel" id="context-panel">
-              <div class="context-main">
-                <span>CONTEXT</span>
-                <b id="context-id">new</b>
-                <small id="context-warning">当前上下文余量充足。</small>
-              </div>
-              <label class="context-limit">
-                <span>最大字符</span>
-                <input id="context-max" type="number" min="1000" max="200000" step="1000" value="20000">
-              </label>
-              <div class="context-usage">
-                <div><span id="context-used">0/20000</span><em id="context-turns">0 turns</em></div>
-                <i><strong id="context-bar"></strong></i>
-              </div>
-            </div>
-            <label class="field">
-              <span>用户任务</span>
-              <textarea id="agent-prompt" placeholder="例如：请检查 demo-repo/taskflow-web 的 package.json 和 README.md，总结项目的安装、启动和测试命令。不要修改任何文件。"></textarea>
-            </label>
-            <label class="task-budget-toggle">
-              <input id="task-budget-auto" type="checkbox" checked>
-              <span>CT-TRM 自动推断任务能力预算</span>
-            </label>
-            <div class="task-auth manual-tools hidden">
-              <div><b>手动工具上限</b><small>关闭自动预算后，未选中的工具会被任务级白名单阻断</small></div>
-              <div id="task-tool-auth" class="task-tool-auth"></div>
-            </div>
-            <div class="console-actions">
-              <small>结果将展示 Agent 规划、策略判定、CT-TRM、工具行动、审计记录和最终回答</small>
-              <button class="primary" id="run-agent">运行 Agent</button>
-            </div>
-            <div id="agent-output" class="agent-output">
-              <span class="output-placeholder">等待任务输入。执行后将展示完整透明链路。</span>
-            </div>
-          </article>
+        <details class="trace-drawer panel" id="trace-drawer">
+          <summary><span><b>Transparency Trace 与 Audit Hash Chain</b><small id="trace-drawer-summary">选择调用后查看完整事件链</small></span><em>展开</em></summary>
+          <div id="trace-events" class="trace-events empty-state">暂无事件</div>
+        </details>
 
-          <article class="panel demo-panel">
-            <div class="panel-head">
-              <div><h2>功能测试任务集</h2></div>
-              <button class="side-toggle" data-toggle-side="demo">收起</button>
-            </div>
-            <div class="one-shot-block">
-              <div class="demo-list one-shot-list">
-                <button class="demo-card safe" data-oneshot="allow"><i>01</i><div><b>项目依赖读取</b><span>package.json / README</span></div><em>ALLOW</em></button>
-                <button class="demo-card" data-oneshot="ct-trm"><i>02</i><div><b>README 本地排障说明</b><span>README.md → ~/.ssh/id_rsa</span></div><em>DENY</em></button>
-                <button class="demo-card ask" data-oneshot="approval"><i>03</i><div><b>配置文件写入确认</b><span>config.yml review_required</span></div><em>ASK</em></button>
-                <button class="demo-card" data-oneshot="dlp"><i>04</i><div><b>构建诊断报告提交</b><span>.env.demo → debug endpoint</span></div><em>DENY</em></button>
+        <details class="settings-drawer panel" id="settings-drawer">
+          <summary><span><b>Agent 任务与设置</b><small>模型接入、自然语言任务、可信工作区</small></span><em>次级区域</em></summary>
+          <div class="settings-content">
+            <section>
+              <div class="section-head"><div><h2>运行自然语言任务</h2><small>需要已配置且支持 Tool Calling 的 LLM</small></div><button class="secondary" id="new-agent-context" type="button">新建上下文</button></div>
+              <label class="field"><span>用户任务</span><textarea id="agent-prompt" placeholder="描述任务范围与允许的副作用"></textarea></label>
+              <label class="check-row"><input id="task-budget-auto" type="checkbox" checked><span>由 CT-TRM 自动推断任务能力预算</span></label>
+              <div class="manual-tools" hidden><div id="task-tool-auth" class="tool-auth"></div></div>
+              <div class="context-row"><label>上下文字符上限 <input id="context-max" type="number" min="1000" max="200000" step="1000" value="20000"></label><span id="context-status">新上下文</span></div>
+              <button class="primary" id="run-agent" type="button">运行 Agent</button>
+              <div id="agent-run-result" class="agent-run-result empty-state">自然语言任务的结果会载入上方工作台。</div>
+            </section>
+
+            <section>
+              <div class="section-head"><div><h2>模型接入</h2><small>API Key 仅发送到当前本地服务进程</small></div><span id="provider-status">未配置</span></div>
+              <div class="form-grid">
+                <label><span>供应商</span><select id="provider-select"></select></label>
+                <label><span>Base URL</span><input id="provider-url" placeholder="https://..."></label>
+                <label><span>模型</span><input id="provider-model" list="provider-models" placeholder="model-id"><datalist id="provider-models"></datalist></label>
+                <label><span>API Key</span><input id="provider-key" type="password" autocomplete="off" placeholder="不会进入审计日志"></label>
               </div>
-            </div>
-          </article>
-        </div>
+              <p id="provider-note" class="form-note">请选择供应商预设。</p>
+              <div class="button-row"><button class="secondary" id="save-provider" type="button">应用配置</button><button class="primary" id="test-provider" type="button">测试连接</button></div>
+            </section>
+
+            <section>
+              <div class="section-head"><div><h2>可信工作区</h2><small>修改会调用真实配置接口</small></div><span id="trusted-workspace-count">0</span></div>
+              <div class="workspace-control"><input id="trusted-workspace-path" placeholder="绝对目录路径" aria-label="可信工作区绝对路径"><button class="secondary" id="choose-trusted-workspace" type="button">选择目录</button><button class="primary" id="add-trusted-workspace" type="button">设为可信</button></div>
+              <div id="trusted-workspace-list" class="trusted-workspace-list empty-state">未配置额外可信目录</div>
+            </section>
+          </div>
+        </details>
       </section>
 
-      <section id="audit" class="view">
-        <article class="panel audit-panel">
-          <div class="panel-head">
-            <div><h2>审计事件与 Hash Chain</h2></div>
-            <div class="audit-actions">
-              <button class="secondary" id="verify-chain">校验哈希链</button>
-              <button class="secondary" id="tamper-test">运行篡改实验</button>
-              <button class="secondary" id="reset-audit">清空筛选</button>
+      <section id="view-audit" data-view-id="audit" class="view" aria-labelledby="page-title">
+        <section class="audit-toolbar panel">
+          <div><span class="section-kicker">全局审计链</span><h2>检索记录并还原完整裁决证据</h2><p>任一关键记录被改动，后续记录将无法通过校验。</p></div>
+          <div class="button-row"><button class="secondary" id="verify-chain" type="button">校验哈希链</button><button class="secondary" id="tamper-test" type="button">运行隔离副本篡改实验</button></div>
+        </section>
+        <div id="audit-verification" class="audit-verification unknown" role="status"><b>尚未取得校验状态</b><span>校验结论不会在前端预设。</span></div>
+        <section class="audit-layout">
+          <article class="panel audit-list-panel">
+            <div class="filters">
+              <input id="audit-search" placeholder="搜索任务、工具、Trace 或规则" aria-label="搜索审计记录">
+              <select id="decision-filter" aria-label="按裁决筛选"><option value="">全部裁决</option><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select>
+              <button class="text-button" id="reset-audit" type="button">清空筛选</button>
             </div>
-          </div>
-          <div id="audit-verification" class="audit-verification">
-            <b>Hash Chain Ready</b>
-            <span>点击“校验哈希链”后将在这里显示校验事件数、断点和完整性结论。</span>
-          </div>
-          <div class="filters">
-            <input id="audit-search" placeholder="搜索 trace、任务、工具或阻断原因">
-            <select id="audit-session-filter">
-              <option value="">全部会话</option>
-            </select>
-            <select id="decision-filter">
-              <option value="">全部决策</option><option value="allow">ALLOW</option>
-              <option value="ask">ASK</option><option value="deny">DENY</option>
-            </select>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>SEQ</th><th>完整时间（本地）</th><th>工具</th><th>决策</th><th>风险</th><th>策略命中</th><th>延迟</th><th>HASH</th></tr></thead>
-              <tbody id="audit-body"></tbody>
-            </table>
-          </div>
-        </article>
+            <div id="audit-list" class="audit-list empty-state">正在读取最近 100 条审计记录…</div>
+          </article>
+          <article class="panel audit-detail-panel" id="audit-detail-panel" tabindex="-1">
+            <div class="empty-state">选择左侧记录，查看来源、风险证据、执行状态与哈希前后关系。</div>
+          </article>
+        </section>
       </section>
 
-      <section id="policies" class="view">
+      <section id="view-policies" data-view-id="policies" class="view" aria-labelledby="page-title">
+        <section class="readonly-banner panel">
+          <div><span class="section-kicker">真实能力边界</span><h2>当前生效策略 · 只读</h2><p>后端当前只提供策略描述接口，没有启停、编辑、优先级或版本写入能力，因此本页不提供无效控件。</p></div>
+          <span id="policy-count">读取中</span>
+        </section>
         <div class="policy-layout">
-          <article class="panel">
-            <div class="panel-head"><div><h2>生效策略</h2></div><span id="tool-count" class="chain-ok">TOOLS</span></div>
-            <div id="policy-list" class="policy-list"></div>
-          </article>
-          <article class="panel policy-explain">
-            <h2>三级处置动作</h2>
-            <div class="decision-card allow"><b>ALLOW</b><span>调用满足任务授权、资源边界和参数安全要求，允许执行。</span></div>
-            <div class="decision-card ask"><b>ASK</b><span>操作具有副作用或访问外部资源，需要用户显式确认。</span></div>
-            <div class="decision-card deny"><b>DENY</b><span>命中敏感资源、危险命令、密钥外传或不可信上下文，立即阻断。</span></div>
-            <div class="tool-catalog"><div id="tool-catalog"></div></div>
-          </article>
+          <section class="panel">
+            <div class="section-head"><div><h2>规则匹配对象与触发条件</h2><small>默认显示安全边界，完整匹配值可展开</small></div></div>
+            <div id="policy-list" class="policy-list empty-state">正在读取生效策略…</div>
+          </section>
+          <section class="panel tools-panel">
+            <div class="section-head"><div><h2>受控工具目录</h2><small>当前可由 Tool Proxy 统一接管的工具</small></div></div>
+            <div id="tool-catalog" class="tool-catalog empty-state">正在读取工具定义…</div>
+            <div class="decision-key" aria-label="三级处置说明">
+              <div class="allow"><b>Allow</b><span>满足任务授权和资源边界，允许进入执行阶段。</span></div>
+              <div class="ask"><b>Ask</b><span>冻结参数，等待用户明确批准或拒绝。</span></div>
+              <div class="deny"><b>Deny</b><span>命中硬拒绝或高风险组合，执行前阻断。</span></div>
+            </div>
+          </section>
         </div>
       </section>
     </main>
   </div>
 
-  <div id="detail-modal" class="modal">
-    <div class="modal-backdrop"></div>
-    <article class="modal-card">
-      <button class="modal-close" aria-label="关闭">×</button>
-      <h2 id="detail-title">事件详情</h2>
-      <div id="detail-content"></div>
-    </article>
-  </div>
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js"></script>
 </body>
 </html>

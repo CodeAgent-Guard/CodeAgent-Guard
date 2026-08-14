@@ -527,7 +527,7 @@ cd /opt/codeagent-guard
 python3 -m unittest discover -s tests -v
 ```
 
-当前项目包含 104 项单元测试。
+当前项目包含 154 项单元测试（不同平台可有少量条件跳过）。
 
 ### 7.2 生成 100 条策略用例
 
@@ -652,6 +652,7 @@ python scripts/check_report_claims.py reports docs
 | ASR、阻断率、FPR、延迟、审计完整性 | 已实现 | 评测中心和评测结果文件 |
 | 外部 Agent HTTP 接入 | 已实现 | `/api/tools/execute` 和 Trace API |
 | OpenCode 执行前授权插件 | 已实现 | `opencode/tool-proxy-plugin.js` + `/api/opencode/authorize-tool` |
+| OpenCode 执行结果回传 | 已实现 | 原生 Hook 回传实际结果；审计优先、完整结果指纹校验、Trace 幂等补写 |
 | CT-TRM 上下文污染风险模型 | 已实现 | 来源、实体、溯源、任务预算、P1-P15、序列风险和固定评分 |
 | CT-TRM 消融评测 | 已实现 | 500 条 AgentToolBench，六种模式对比；保留旧 50 条回归集 |
 
@@ -673,6 +674,7 @@ python scripts/check_report_claims.py reports docs
 | 项目 | 当前状态 |
 |---|---|
 | OpenCode 进程退出后的任务恢复 | 部分实现；Hook 保持运行时可在审批后继续原生调用，若 OpenCode 进程已退出则不能恢复该进程 |
+| OpenCode 长输出 DLP | 原型限制；完整执行结果会生成 SHA-256 指纹用于幂等与冲突校验，但 DLP 与界面仅扫描/保存每个文本字段前 12,000 字符 |
 | MCP Server | 未实现；架构已预留，后续应把 MCP tools 转发到 `ToolProxy.invoke()` |
 | 独立 `scan_secret` 工具 | 未实现；密钥检测已内置于写文件和邮件策略 |
 | 机器学习异常检测 | 未实现；当前是确定性规则策略引擎 |
@@ -738,6 +740,29 @@ PORT=8001 ./start.sh
 
 然后访问 `http://127.0.0.1:8001`。
 
+如果 `./start.sh` 提示当前数据目录已有实例，先检查 Guard 自己，不要结束
+`systemd-resolve` 等无关系统进程：
+
+```bash
+curl -sS http://127.0.0.1:8000/api/health
+sudo lsof -i :8000
+```
+
+`lsof` 的端口过滤语法是 `-i :8000`；`kill` 后只能跟真实 PID。Windows 与
+WSL 共享项目 `data/` 时，另一侧实例可能无法出现在当前 WSL 的 `lsof` 输出中，
+但 Guard 会用跨环境实例锁阻止两边同时写 SQLite。
+
+### OpenCode 已运行，但前端没有出现记录
+
+1. 在项目根目录运行 `opencode debug config`，确认只加载当前项目的
+   `.opencode/plugins/codeagent-guard.js`；删除用户配置中已不存在的旧绝对路径。
+2. 用 `curl -sS http://127.0.0.1:8000/api/health` 确认 build 为
+   `2026.08.14-human-evidence-v1` 或更新版本。
+3. 在前端“设置”中将 OpenCode 当前项目目录加入“可信工作环境”。相对路径会以
+   OpenCode 的真实工作目录解析；未授权的工作区外访问仍会 Ask 或 Deny。
+4. 保持 Guard 运行后重新启动一次 OpenCode 会话。前端每 3 秒同步 Trace、审计链
+   与审批；执行结果临时回传失败时插件会重试，服务重启也会从已提交审计补齐 Trace。
+
 ### Windows 浏览器打不开页面
 
 先在 WSL 中检查：
@@ -794,7 +819,7 @@ data/outbox/
 - 不打包 `data/audit.db` 和 `data/outbox/` 中的敏感演示数据。
 - 清理 `__pycache__/` 和 `*.pyc`。
 - 保留 `reports/`、`adversarial/` 和 `data/evaluation/`，用于展示作品成果。
-- 在干净的 WSL Ubuntu 环境重新执行启动和 104 项单元测试。
+- 在干净的 WSL Ubuntu 环境重新执行启动和 154 项单元测试。
 
 更新部署后可用以下命令确认不是旧进程或旧代码：
 
@@ -805,7 +830,7 @@ curl -s http://127.0.0.1:8000/api/health
 当前修复版本的 `build` 应为：
 
 ```text
-2026.06.23-agenttoolbench-v3
+2026.08.14-human-evidence-v1
 ```
 
 `.gitignore` 已忽略 `.env`、`.env.permissions`、审计数据库、邮件 outbox 和 Python

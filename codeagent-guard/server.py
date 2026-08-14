@@ -6,6 +6,7 @@ import atexit
 import json
 import mimetypes
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -53,54 +54,210 @@ def _env_paths(name: str) -> tuple[Path, ...]:
 
 OPEN_DIRECTORY_ROOTS = _env_paths("GUARD_OPEN_DIRECTORY_ROOTS")
 EXTERNAL_WRITE_ROOTS = _env_paths("GUARD_EXTERNAL_WRITE_ROOTS")
-BUILD = "2026.06.23-agenttoolbench-v4"
+BUILD = "2026.08.14-human-evidence-v1"
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 DATA.mkdir(parents=True, exist_ok=True)
 
 _INSTANCE_LOCK_TOKEN = ""
 _INSTANCE_LOCK_STOP = threading.Event()
+_INSTANCE_LOCK_PATH = DATA / "server.instance.lock"
+_INSTANCE_ARBITER_STALE_AFTER = 10.0
+_INSTANCE_ARBITER_WAIT_TIMEOUT = 12.0
+_INSTANCE_ARBITER_POLL_INTERVAL = 0.05
+_LOCK_PORT = int(os.getenv("PORT", "8000"))
+for index, argument in enumerate(os.sys.argv[:-1]):
+    if argument == "--port":
+        try:
+            _LOCK_PORT = int(os.sys.argv[index + 1])
+        except ValueError:
+            pass
 
 
 def _release_instance_lock(lock_path: Path) -> None:
+    try:
+        arbiter_path, arbiter_marker, arbiter_token = _acquire_instance_arbiter(
+            lock_path
+        )
+    except (OSError, RuntimeError):
+        return
     try:
         if lock_path.read_text(encoding="utf-8").strip() == _INSTANCE_LOCK_TOKEN:
             lock_path.unlink(missing_ok=True)
     except OSError:
         pass
+    finally:
+        _release_instance_arbiter(arbiter_path, arbiter_marker, arbiter_token)
 
 
-def _acquire_instance_lock(lock_path: Path, stale_after: float = 15.0) -> None:
+def _port_is_reachable(port: int, host: str = "127.0.0.1") -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _instance_arbiter_path(lock_path: Path) -> Path:
+    return lock_path.with_name(f"{lock_path.name}.arbiter")
+
+
+def _remove_stale_instance_arbiter(arbiter_path: Path) -> bool:
+    """Remove only the exact, expired owner markers observed in an arbiter."""
+    try:
+        arbiter_stat = arbiter_path.stat()
+    except FileNotFoundError:
+        return True
+
+    if not arbiter_path.is_dir():
+        if time.time() - arbiter_stat.st_mtime < _INSTANCE_ARBITER_STALE_AFTER:
+            return False
+        try:
+            arbiter_path.unlink()
+            return True
+        except (FileNotFoundError, IsADirectoryError):
+            return not arbiter_path.exists()
+        except OSError:
+            return False
+
+    try:
+        entries = tuple(arbiter_path.iterdir())
+        newest_mtime = max(
+            (arbiter_stat.st_mtime, *(entry.stat().st_mtime for entry in entries)),
+        )
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if time.time() - newest_mtime < _INSTANCE_ARBITER_STALE_AFTER:
+        return False
+    if any(not entry.is_file() or not entry.name.startswith("owner-") for entry in entries):
+        return False
+
+    # Marker names contain a UUID. A concurrent recovery can therefore remove
+    # only markers from the stale directory it observed, never a new owner's.
+    for entry in entries:
+        try:
+            entry.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+    try:
+        arbiter_path.rmdir()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_instance_arbiter(lock_path: Path) -> tuple[Path, str, str]:
+    """Acquire a short-lived, cross-process arbiter for the main lock."""
+    arbiter_path = _instance_arbiter_path(lock_path)
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    marker_name = f"owner-{token}"
+    candidate_path = arbiter_path.with_name(
+        f".{arbiter_path.name}.{token}.candidate"
+    )
+    candidate_path.mkdir()
+    marker_path = candidate_path / marker_name
+    with marker_path.open("x", encoding="utf-8") as handle:
+        handle.write(token)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    deadline = time.monotonic() + _INSTANCE_ARBITER_WAIT_TIMEOUT
+    try:
+        while True:
+            try:
+                candidate_path.rename(arbiter_path)
+                return arbiter_path, marker_name, token
+            except OSError as exc:
+                if not arbiter_path.exists():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Unable to acquire the CodeAgent Guard instance lock arbiter"
+                        ) from exc
+                    time.sleep(_INSTANCE_ARBITER_POLL_INTERVAL)
+                    continue
+            _remove_stale_instance_arbiter(arbiter_path)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Unable to acquire the CodeAgent Guard instance lock arbiter"
+                )
+            time.sleep(_INSTANCE_ARBITER_POLL_INTERVAL)
+    finally:
+        try:
+            marker_path.unlink(missing_ok=True)
+            candidate_path.rmdir()
+        except OSError:
+            pass
+
+
+def _release_instance_arbiter(
+    arbiter_path: Path,
+    marker_name: str,
+    token: str,
+) -> None:
+    marker_path = arbiter_path / marker_name
+    try:
+        if marker_path.read_text(encoding="utf-8").strip() != token:
+            return
+        marker_path.unlink()
+        arbiter_path.rmdir()
+    except OSError:
+        pass
+
+
+def _acquire_instance_lock(
+    lock_path: Path,
+    stale_after: float = 15.0,
+    *,
+    port: int | None = None,
+) -> None:
     """Prevent Windows and WSL servers from sharing the same SQLite files."""
     global _INSTANCE_LOCK_TOKEN
     token = f"{os.getpid()}:{uuid.uuid4().hex}"
-    for _ in range(3):
-        try:
-            descriptor = os.open(
-                lock_path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            )
-        except FileExistsError:
+    arbiter_path, arbiter_marker, arbiter_token = _acquire_instance_arbiter(lock_path)
+    try:
+        for _ in range(3):
             try:
-                age = time.time() - lock_path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age < stale_after:
-                raise RuntimeError(
-                    "CodeAgent Guard is already running for this data directory"
+                descriptor = os.open(
+                    lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 )
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            continue
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(token)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _INSTANCE_LOCK_TOKEN = token
-        break
-    else:
-        raise RuntimeError("Unable to acquire the CodeAgent Guard instance lock")
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                port_reachable = bool(port and _port_is_reachable(port))
+                if port_reachable or age < stale_after:
+                    location = (
+                        f"，且 127.0.0.1:{port} 可连接"
+                        if port_reachable
+                        else "；端口在当前系统不可见，可能由 Windows/WSL 另一侧实例持有"
+                    )
+                    raise RuntimeError(
+                        "CodeAgent Guard is already running for this data directory"
+                        f"{location}。请打开 http://localhost:{port or 8000}/api/health "
+                        "确认实例；不要结束 systemd-resolve 等无关系统进程。"
+                    )
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(token)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _INSTANCE_LOCK_TOKEN = token
+            break
+        else:
+            raise RuntimeError("Unable to acquire the CodeAgent Guard instance lock")
+    finally:
+        _release_instance_arbiter(arbiter_path, arbiter_marker, arbiter_token)
 
     def heartbeat() -> None:
         while not _INSTANCE_LOCK_STOP.wait(2.0):
@@ -117,9 +274,13 @@ def _acquire_instance_lock(lock_path: Path, stale_after: float = 15.0) -> None:
 
 if __name__ == "__main__":
     try:
-        _acquire_instance_lock(DATA / "server.instance.lock")
+        _acquire_instance_lock(
+            _INSTANCE_LOCK_PATH,
+            port=_LOCK_PORT,
+        )
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from None
+
 
 trusted_workspaces = TrustedWorkspaceStore(DATA / "trusted_workspaces.json")
 runtime_state = RuntimeStateStore(DATA / "state.db")
@@ -154,6 +315,7 @@ proxy = ToolProxy(
 provider = LLMProvider()
 agent = Agent(proxy, provider, transparency, DATA / "agent_contexts.json")
 opencode_adapter = OpenCodeToolProxyAdapter(proxy, transparency)
+opencode_adapter.reconcile_external_results()
 evaluation = EvaluationService(policy, DATA / "evaluation", audit)
 ct_trm_evaluation = CTTRMEvaluationService(
     ROOT / "benchmarks" / "agent_tool_bench" / "ct_trm_cases.yaml",
@@ -590,7 +752,13 @@ def main() -> None:
     parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")))
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        _release_instance_lock(_INSTANCE_LOCK_PATH)
+        raise SystemExit(
+            f"CodeAgent Guard 无法监听 {args.host}:{args.port}: {exc}"
+        ) from None
     print(f"CodeAgent Guard: http://localhost:{args.port}")
     print(f"Workspace: {WORKSPACE}")
     try:
@@ -599,6 +767,7 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        _release_instance_lock(_INSTANCE_LOCK_PATH)
 
 
 if __name__ == "__main__":

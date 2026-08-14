@@ -46,7 +46,12 @@ class AuditStore:
                     latency_ms REAL NOT NULL,
                     prev_hash TEXT NOT NULL,
                     hash TEXT NOT NULL UNIQUE,
-                    ct_trm_json TEXT NOT NULL DEFAULT '{}'
+                    ct_trm_json TEXT NOT NULL DEFAULT '{}',
+                    event_type TEXT NOT NULL DEFAULT 'decision',
+                    call_id TEXT NOT NULL DEFAULT '',
+                    execution_status TEXT NOT NULL DEFAULT '',
+                    result_fingerprint TEXT NOT NULL DEFAULT '',
+                    result_evidence_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
             columns = {
@@ -58,16 +63,76 @@ class AuditStore:
                     "ALTER TABLE audit_events "
                     "ADD COLUMN ct_trm_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            if "event_type" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN event_type TEXT NOT NULL DEFAULT 'decision'"
+                )
+            if "call_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN call_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "execution_status" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN execution_status TEXT NOT NULL DEFAULT ''"
+                )
+            if "result_fingerprint" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN result_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
+            if "result_evidence_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN result_evidence_json TEXT NOT NULL DEFAULT '{}'"
+                )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit_events(trace_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_events(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_call ON audit_events(call_id)")
             conn.commit()
 
     def append(self, *, trace_id: str, task: str, tool: str, args: dict,
                decision: str, risk_level: str, reasons: list[str], source: str,
                tainted: bool, result_summary: str, latency_ms: float,
-               ct_trm: dict | None = None) -> dict:
+               ct_trm: dict | None = None,
+               event_type: str = "decision",
+               call_id: str | None = None,
+               execution_status: str | None = None,
+               result_fingerprint: str | None = None,
+               result_evidence: dict | None = None) -> dict:
         with self.lock, closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            normalized_event_type = str(event_type or "decision")
+            normalized_call_id = str(call_id or "")
+            normalized_execution_status = str(execution_status or "")
+            normalized_result_fingerprint = str(result_fingerprint or "")
+            normalized_result_evidence = result_evidence or {}
+            if (
+                normalized_event_type == "external_execution_result"
+                and normalized_call_id
+            ):
+                existing = conn.execute(
+                    "SELECT * FROM audit_events WHERE trace_id=? "
+                    "AND call_id=? AND event_type=? ORDER BY seq DESC LIMIT 1",
+                    (trace_id, normalized_call_id, normalized_event_type),
+                ).fetchone()
+                if existing is not None:
+                    existing_fingerprint = str(
+                        existing["result_fingerprint"] or ""
+                    )
+                    if (
+                        not normalized_result_fingerprint
+                        or existing_fingerprint != normalized_result_fingerprint
+                    ):
+                        conn.rollback()
+                        raise ValueError(
+                            "conflicting external execution result for "
+                            f"{trace_id}/{normalized_call_id}"
+                        )
+                    conn.rollback()
+                    return self._row(existing)
             last = conn.execute("SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1").fetchone()
             prev_hash = last["hash"] if last else "GENESIS"
             timestamp = datetime.now(timezone.utc).isoformat()
@@ -90,22 +155,66 @@ class AuditStore:
             }
             if ct_trm:
                 payload["ct_trm"] = ct_trm
+            if normalized_event_type != "decision":
+                payload["event_type"] = normalized_event_type
+            if normalized_call_id:
+                payload["call_id"] = normalized_call_id
+            if normalized_execution_status:
+                payload["execution_status"] = normalized_execution_status
+            if normalized_result_fingerprint:
+                payload["result_fingerprint"] = normalized_result_fingerprint
+            if normalized_result_evidence:
+                payload["result_evidence"] = normalized_result_evidence
             event_hash = hashlib.sha256((prev_hash + canonical_json(payload)).encode()).hexdigest()
             cursor = conn.execute("""
                 INSERT INTO audit_events (
                     timestamp, trace_id, task, tool, args_json, decision, risk_level,
                     reasons_json, source, tainted, result_summary, latency_ms,
-                    prev_hash, hash, ct_trm_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prev_hash, hash, ct_trm_json, event_type, call_id,
+                    execution_status, result_fingerprint, result_evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp, trace_id, task, tool, canonical_json(args), decision, risk_level,
                 canonical_json(reasons), source, int(tainted),
                 normalized_summary, normalized_latency, prev_hash, event_hash,
                 canonical_json(ct_trm or {}),
+                normalized_event_type, normalized_call_id,
+                normalized_execution_status,
+                normalized_result_fingerprint,
+                canonical_json(normalized_result_evidence),
             ))
             conn.commit()
             payload.update({"seq": cursor.lastrowid, "hash": event_hash})
             return payload
+
+    def find_event(
+        self,
+        *,
+        trace_id: str,
+        call_id: str,
+        event_type: str | None = None,
+    ) -> dict | None:
+        clauses = ["trace_id=?", "call_id=?"]
+        params: list[Any] = [trace_id, call_id]
+        if event_type is not None:
+            clauses.append("event_type=?")
+            params.append(event_type)
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM audit_events WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY seq DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return self._row(row) if row is not None else None
+
+    def get_event(self, seq: int) -> dict | None:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM audit_events WHERE seq=?",
+                (int(seq),),
+            ).fetchone()
+        return self._row(row) if row is not None else None
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict:
@@ -113,6 +222,13 @@ class AuditStore:
         value["args"] = json.loads(value.pop("args_json"))
         value["reasons"] = json.loads(value.pop("reasons_json"))
         value["ct_trm"] = json.loads(value.pop("ct_trm_json", "{}"))
+        value["result_evidence"] = json.loads(
+            value.pop("result_evidence_json", "{}")
+        )
+        value.setdefault("event_type", "decision")
+        value.setdefault("call_id", "")
+        value.setdefault("execution_status", "")
+        value.setdefault("result_fingerprint", "")
         value["tainted"] = bool(value["tainted"])
         return value
 
@@ -139,12 +255,15 @@ class AuditStore:
                        AVG(latency_ms) AS latency,
                        COUNT(DISTINCT trace_id) AS traces
                 FROM audit_events
+                WHERE event_type='decision'
             """).fetchone()
             risks = conn.execute(
-                "SELECT risk_level, COUNT(*) count FROM audit_events GROUP BY risk_level"
+                "SELECT risk_level, COUNT(*) count FROM audit_events "
+                "WHERE event_type='decision' GROUP BY risk_level"
             ).fetchall()
             tools = conn.execute(
-                "SELECT tool, COUNT(*) count FROM audit_events GROUP BY tool ORDER BY count DESC"
+                "SELECT tool, COUNT(*) count FROM audit_events "
+                "WHERE event_type='decision' GROUP BY tool ORDER BY count DESC"
             ).fetchall()
         calls = totals["calls"] or 0
         blocked = totals["blocked"] or 0
@@ -188,6 +307,16 @@ class AuditStore:
             }
             if event.get("ct_trm"):
                 payload["ct_trm"] = event["ct_trm"]
+            if event.get("event_type", "decision") != "decision":
+                payload["event_type"] = event["event_type"]
+            if event.get("call_id"):
+                payload["call_id"] = event["call_id"]
+            if event.get("execution_status"):
+                payload["execution_status"] = event["execution_status"]
+            if event.get("result_fingerprint"):
+                payload["result_fingerprint"] = event["result_fingerprint"]
+            if event.get("result_evidence"):
+                payload["result_evidence"] = event["result_evidence"]
             calculated = hashlib.sha256((expected_prev + canonical_json(payload)).encode()).hexdigest()
             if event["prev_hash"] != expected_prev or event["hash"] != calculated:
                 return {"valid": False, "events": len(rows), "broken_at": event["seq"]}

@@ -494,6 +494,23 @@ class TaintTracker:
         tool_call_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[TaintSource, list[SecurityEntity]]:
+        metadata = metadata or {}
+        idempotency_key = str(metadata.get("idempotency_key") or "")
+        if idempotency_key:
+            with self._lock:
+                existing = next(
+                    (
+                        item for item in self._sources.values()
+                        if item.trace_id == trace_id
+                        and item.tool_call_id == tool_call_id
+                        and item.metadata.get("idempotency_key") == idempotency_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    return existing, list(
+                        self._entities.get(existing.source_id, ())
+                    )
         source = self.register_source(
             content,
             source_type,
@@ -528,7 +545,7 @@ class TaintTracker:
         )
         entities: list[SecurityEntity] = []
         for name, value in self._flatten_args(args):
-            if name.startswith("_"):
+            if name.startswith("_") or name in {"cwd", "workdir"}:
                 continue
             text = str(value)
             if name in {"path", "source", "destination", "file", "file_path"}:

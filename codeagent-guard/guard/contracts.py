@@ -17,6 +17,7 @@ class ToolCall:
     agent_id: str = "external-agent"
     allowed_tools: tuple[str, ...] | None = None
     conversation_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     call_id: str = field(default_factory=lambda: f"call-{uuid.uuid4().hex[:12]}")
 
 

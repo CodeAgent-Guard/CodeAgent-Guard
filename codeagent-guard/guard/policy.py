@@ -27,6 +27,11 @@ class Decision:
     action: str = "allow"
     risk_level: str = "low"
     reasons: list[str] = field(default_factory=list)
+    # Module-local evidence. ``reasons`` remains the backward-compatible
+    # fused list returned to API callers and written to the audit chain.
+    policy_reasons: list[str] = field(default_factory=list)
+    ct_trm_reasons: list[str] = field(default_factory=list)
+    dlp_reasons: list[str] = field(default_factory=list)
     normalized_args: dict = field(default_factory=dict)
     assessment: dict = field(default_factory=dict)
     dlp_scan: dict = field(default_factory=dict)
@@ -121,6 +126,9 @@ class PolicyEngine:
             self.taint_tracker,
             self.chain_risk,
         )
+        self.risk_model.set_trusted_workspace_roots(
+            self.trusted_workspace_roots
+        )
         self._registered_tasks: set[tuple[str, str]] = set()
 
     def set_trusted_workspace_roots(
@@ -128,6 +136,9 @@ class PolicyEngine:
         roots: list[Path] | tuple[Path, ...],
     ) -> None:
         self.trusted_workspace_roots = self._normalize_roots(roots)
+        self.risk_model.set_trusted_workspace_roots(
+            self.trusted_workspace_roots
+        )
 
     def _normalize_roots(
         self,
@@ -194,6 +205,7 @@ class PolicyEngine:
         decision = Decision(normalized_args=dict(args))
         if tool not in self.TOOLS:
             decision.add("deny", "high", "tool_not_allowed")
+            decision.policy_reasons = list(decision.reasons)
             return decision
         if (
             tool not in self.allowed_tools
@@ -203,12 +215,14 @@ class PolicyEngine:
 
         evaluator = getattr(self, f"_evaluate_{tool}")
         evaluator(decision, args)
+        decision.policy_reasons = list(decision.reasons)
         dlp_report = self.dlp.scan_tool_call(
             tool,
             args,
             internal_domains=self.internal_domains,
         )
         self._apply_dlp_report(decision, dlp_report)
+        reasons_before_context_policy = set(decision.reasons)
 
         low_trust_source = source in {
             "runtime_log",
@@ -247,6 +261,12 @@ class PolicyEngine:
                     "high",
                     "user_confirmation_required",
                 )
+        for reason in decision.reasons:
+            if (
+                reason not in reasons_before_context_policy
+                and reason not in decision.policy_reasons
+            ):
+                decision.policy_reasons.append(reason)
         ct_enabled = (
             ct_trm_mode != "baseline_rules"
             and bool(trace_id)
@@ -293,26 +313,53 @@ class PolicyEngine:
                         "task_tool_misalignment",
                     }
                 ]
+            pre_ct_reasons = set(decision.reasons)
+            primary_ct_reason = (
+                assessment.reasons[0]
+                if assessment.reasons else "ct_trm_assessment"
+            )
             decision.add(
                 assessment.action,
                 assessment.risk_level,
-                assessment.reasons[0]
-                if assessment.reasons else "ct_trm_assessment",
+                primary_ct_reason,
             )
             for reason in assessment.reasons[1:]:
                 if reason not in decision.reasons:
                     decision.reasons.append(reason)
+            decision.ct_trm_reasons = [
+                reason for reason in decision.reasons
+                if reason not in pre_ct_reasons
+            ]
+            if not decision.ct_trm_reasons:
+                decision.ct_trm_reasons = ["ct_trm_assessment"]
         if decision.action == "deny":
             decision.reasons = [r for r in decision.reasons if r != "user_confirmation_required"]
+            decision.policy_reasons = [
+                reason for reason in decision.policy_reasons
+                if reason != "user_confirmation_required"
+            ]
         if approved and decision.action == "ask":
             decision.action = "allow"
             decision.reasons = [r for r in decision.reasons if r != "user_confirmation_required"]
+            decision.policy_reasons = [
+                reason for reason in decision.policy_reasons
+                if reason != "user_confirmation_required"
+            ]
         return decision
 
     @staticmethod
     def _apply_dlp_report(decision: Decision, report: DLPReport) -> None:
         decision.dlp_scan = report.to_dict()
         decision.dlp_findings = decision.dlp_scan.get("findings", [])
+        decision.dlp_reasons = list(report.reasons)
+        # A deterministic rule and DLP can recognize the same secret pattern.
+        # Assign overlapping evidence to DLP so module-local Trace evidence is
+        # disjoint, while the fused ``decision.reasons`` list stays unchanged.
+        dlp_reason_set = set(decision.dlp_reasons)
+        decision.policy_reasons = [
+            reason for reason in decision.policy_reasons
+            if reason not in dlp_reason_set
+        ]
         for finding in report.findings:
             for reason in finding.reasons:
                 decision.add(finding.action, finding.risk_level, reason)
@@ -357,7 +404,13 @@ class PolicyEngine:
         call_id: str | None = None,
         conversation_id: str | None = None,
         taint_matches: list | None = None,
+        result_fingerprint: str | None = None,
     ) -> None:
+        result_key = (
+            f"tool-result:{trace_id}:{call_id}:{result_fingerprint}"
+            if call_id and result_fingerprint
+            else None
+        )
         content, source_type, origin = self._result_context(
             tool,
             args,
@@ -371,7 +424,14 @@ class PolicyEngine:
                 trace_id=trace_id,
                 tool_call_id=call_id,
                 conversation_id=conversation_id,
-                metadata={"tool": tool, "result_source": True},
+                metadata={
+                    "tool": tool,
+                    "result_source": True,
+                    **(
+                        {"idempotency_key": result_key}
+                        if result_key else {}
+                    ),
+                },
             )
         self.chain_risk.update_after_tool_result(
             tool,
@@ -380,6 +440,7 @@ class PolicyEngine:
             decision,
             trace_id,
             taint_matches=taint_matches,
+            result_key=result_key,
         )
 
     def _register_task_context(
@@ -463,6 +524,15 @@ class PolicyEngine:
     @staticmethod
     def _normalize_host_path(raw_path: str) -> Path:
         expanded = os.path.expanduser(raw_path.strip())
+        wsl_path = (
+            re.match(r"^/mnt/([A-Za-z])/(.*)$", expanded)
+            if os.name == "nt"
+            else None
+        )
+        if wsl_path:
+            drive = wsl_path.group(1).upper()
+            remainder = wsl_path.group(2).replace("/", "\\")
+            return Path(f"{drive}:\\{remainder}").resolve(strict=False)
         windows_path = (
             re.match(r"^([A-Za-z]):[\\/](.*)$", expanded)
             if os.name != "nt"
@@ -608,6 +678,18 @@ class PolicyEngine:
         if not command:
             decision.add("deny", "medium", "invalid_arguments")
             return
+        raw_cwd = str(args.get("cwd", "")).strip()
+        if raw_cwd:
+            cwd, cwd_scope, _ = self._directory_path_checks(
+                decision,
+                raw_cwd,
+                argument_name="cwd",
+            )
+            if cwd_scope == "external_write" and decision.action != "deny":
+                decision.add("ask", "medium", "external_command_workdir")
+                decision.add("ask", "medium", "user_confirmation_required")
+            if not cwd.exists() or not cwd.is_dir():
+                decision.add("deny", "medium", "command_workdir_not_found")
         safe_cleanup = TaintTracker.command_is_safe_cleanup(command)
         for pattern, reason in self.DENY_COMMANDS:
             if pattern.search(command):

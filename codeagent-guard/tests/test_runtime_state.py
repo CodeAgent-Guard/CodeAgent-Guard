@@ -179,17 +179,17 @@ class RuntimeStateTests(unittest.TestCase):
                 self.assertIn('"tool.execute.after"', plugin)
                 self.assertIn("/api/opencode/tool-result", plugin)
                 self.assertIn("sessionPrompts", plugin)
-                self.assertIn("sessionScenarios", plugin)
                 self.assertIn("sessionTraceIds", plugin)
                 self.assertIn("sessionMessageIds", plugin)
                 self.assertIn("stablePromptId", plugin)
                 self.assertIn("traceIdForSession", plugin)
-                self.assertIn("videoScenarioFromPrompt", plugin)
-                self.assertIn("video_scenario", plugin)
                 self.assertIn("toolCallArgs", plugin)
                 self.assertIn("promptTextFromMessage", plugin)
                 self.assertIn("error.retryable === false", plugin)
                 self.assertIn("${messageID}", plugin)
+                self.assertNotIn("sessionScenarios", plugin)
+                self.assertNotIn("videoScenarioFromPrompt", plugin)
+                self.assertNotIn("video_scenario", plugin)
 
 
 if __name__ == "__main__":
