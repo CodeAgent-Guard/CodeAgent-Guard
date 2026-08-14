@@ -17,7 +17,7 @@
 
       <nav>
         <button class="nav active" data-view="dashboard" aria-current="page"><span>总览</span><small>运行态</small></button>
-        <button class="nav" data-view="agent"><span>Agent 控制台</span><small>主演示</small></button>
+        <button class="nav" data-view="agent"><span>Agent 控制台</span><small>调用分析</small></button>
         <button class="nav" data-view="audit"><span>审计日志</span><small>证据链</small></button>
         <button class="nav" data-view="policies"><span>生效策略</span><small>只读</small></button>
       </nav>
@@ -26,14 +26,12 @@
         <i aria-hidden="true"></i>
         <div><strong>正在连接网关</strong><small id="workspace-label">工作区读取中</small></div>
       </div>
-      <div class="build-label" id="build-label">构建版本读取中</div>
     </aside>
 
     <main>
       <header class="topbar">
         <div><h1 id="page-title">系统总览</h1><p id="page-subtitle">工具调用安全网关的实时状态</p></div>
         <div class="header-actions">
-          <span class="llm-state loading" id="llm-state"><i></i><b>LLM 状态读取中</b></span>
           <button class="icon-button" id="refresh" type="button" aria-label="刷新当前数据" title="刷新">↻</button>
         </div>
       </header>
@@ -49,7 +47,7 @@
           <div><small>当前工作区</small><code id="runtime-workspace">读取中</code></div>
           <div><small>最近 Trace</small><code id="runtime-trace">暂无记录</code></div>
           <div><small>数据范围</small><strong>全部审计库</strong><em>实时汇总</em></div>
-          <button class="primary" type="button" data-jump="agent">进入主演示</button>
+          <button class="primary" type="button" data-jump="agent">查看调用分析</button>
         </section>
 
         <div class="overview-grid">
@@ -66,7 +64,7 @@
             <div class="fact-grid">
               <div><small>工具调用</small><strong id="metric-calls">—</strong><em>全部审计库</em></div>
               <div><small>待审批</small><strong id="metric-approvals">—</strong><em>当前待处理队列</em></div>
-              <div><small>Deny 记录</small><strong id="metric-denied">—</strong><em>全部审计库</em></div>
+              <div><small>DENY 记录</small><strong id="metric-denied">—</strong><em>全部审计库</em></div>
               <div><small>策略平均耗时</small><strong><span id="metric-latency">—</span><i> ms</i></strong><em>全部审计库</em></div>
             </div>
             <div class="integrity-line unknown" id="overview-integrity">
@@ -83,15 +81,15 @@
 
         <section class="panel compact-pipeline-panel">
           <div class="section-head">
-            <div><span class="section-kicker">统一技术叙事</span><h2>一次工具调用的安全闭环</h2></div>
+            <div><span class="section-kicker">处理链路</span><h2>一次工具调用的安全闭环</h2></div>
             <small>概念链路；实际事件顺序可在 Transparency Trace 中核对</small>
           </div>
           <div class="compact-pipeline" aria-label="工具调用安全处理链路">
             <div><b>异构调用</b><span>Agent / OpenCode</span></div><i>→</i>
             <div><b>统一 ToolCall</b><span>tool + args</span></div><i>→</i>
-            <div class="semantic"><b>参数安全语义重构</b><span>对象 · 行为 · 副作用</span></div><i>→</i>
+            <div class="semantic"><b>参数安全语义重构</b><span>对象 · 行为 · 影响</span></div><i>→</i>
             <div><b>风险证据</b><span>Policy · CT-TRM · DLP</span></div><i>→</i>
-            <div><b>Decision Fusion</b><span>Allow · Ask · Deny</span></div><i>→</i>
+            <div><b>Decision Fusion</b><span>ALLOW · ASK · DENY</span></div><i>→</i>
             <div><b>受控执行</b><span>执行 / 暂停 / 阻断</span></div><i>→</i>
             <div><b>Trace / Audit</b><span>记录 · 哈希校验</span></div>
           </div>
@@ -142,10 +140,10 @@
         </details>
 
         <details class="settings-drawer panel" id="settings-drawer">
-          <summary><span><b>Agent 任务与设置</b><small>模型接入、自然语言任务、可信工作区</small></span><em>次级区域</em></summary>
+          <summary><span><b>Agent 任务与设置</b><small>自研 Agent、模型接入、可信工作区</small></span><em>次级区域</em></summary>
           <div class="settings-content">
             <section>
-              <div class="section-head"><div><h2>运行自然语言任务</h2><small>需要已配置且支持 Tool Calling 的 LLM</small></div><button class="secondary" id="new-agent-context" type="button">新建上下文</button></div>
+              <div class="section-head"><div><h2>运行自研 Agent 任务</h2><small>运行入口｜自研 Agent</small></div><button class="secondary" id="new-agent-context" type="button">新建上下文</button></div>
               <label class="field"><span>用户任务</span><textarea id="agent-prompt" placeholder="描述任务范围与允许的副作用"></textarea></label>
               <label class="check-row"><input id="task-budget-auto" type="checkbox" checked><span>由 CT-TRM 自动推断任务能力预算</span></label>
               <div class="manual-tools" hidden><div id="task-tool-auth" class="tool-auth"></div></div>
@@ -177,7 +175,7 @@
 
       <section id="view-audit" data-view-id="audit" class="view" aria-labelledby="page-title">
         <section class="audit-toolbar panel">
-          <div><span class="section-kicker">全局审计链</span><h2>检索记录并还原完整裁决证据</h2><p>任一关键记录被改动，后续记录将无法通过校验。</p></div>
+          <div><span class="section-kicker">按调用检索</span><h2>还原一次工具调用的完整裁决证据</h2><p>请求、证据、裁决、审批、执行与审计按同一次调用聚合。</p></div>
           <div class="button-row"><button class="secondary" id="verify-chain" type="button">校验哈希链</button><button class="secondary" id="tamper-test" type="button">运行隔离副本篡改实验</button></div>
         </section>
         <div id="audit-verification" class="audit-verification unknown" role="status"><b>尚未取得校验状态</b><span>校验结论不会在前端预设。</span></div>
@@ -185,7 +183,7 @@
           <article class="panel audit-list-panel">
             <div class="filters">
               <input id="audit-search" placeholder="搜索任务、工具、Trace 或规则" aria-label="搜索审计记录">
-              <select id="decision-filter" aria-label="按裁决筛选"><option value="">全部裁决</option><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select>
+              <select id="decision-filter" aria-label="按裁决筛选"><option value="">全部裁决</option><option value="allow">ALLOW</option><option value="ask">ASK</option><option value="deny">DENY</option></select>
               <button class="text-button" id="reset-audit" type="button">清空筛选</button>
             </div>
             <div id="audit-list" class="audit-list empty-state">正在读取最近 100 条审计记录…</div>
@@ -198,22 +196,17 @@
 
       <section id="view-policies" data-view-id="policies" class="view" aria-labelledby="page-title">
         <section class="readonly-banner panel">
-          <div><span class="section-kicker">真实能力边界</span><h2>当前生效策略 · 只读</h2><p>后端当前只提供策略描述接口，没有启停、编辑、优先级或版本写入能力，因此本页不提供无效控件。</p></div>
+          <div><span class="section-kicker">生效规则</span><h2>当前展示网关实际生效的只读策略</h2><p>规则事实进入风险证据，最终裁决由 Decision Fusion 输出。</p></div>
           <span id="policy-count">读取中</span>
         </section>
         <div class="policy-layout">
           <section class="panel">
-            <div class="section-head"><div><h2>规则匹配对象与触发条件</h2><small>默认显示安全边界，完整匹配值可展开</small></div></div>
+            <div class="section-head"><div><h2>规则匹配对象与触发条件</h2><small>点击整行查看策略定义与完整匹配值</small></div></div>
             <div id="policy-list" class="policy-list empty-state">正在读取生效策略…</div>
           </section>
           <section class="panel tools-panel">
-            <div class="section-head"><div><h2>受控工具目录</h2><small>当前可由 Tool Proxy 统一接管的工具</small></div></div>
+            <div class="section-head"><div><h2>受控工具</h2><small>默认显示摘要，完整参数定义可展开</small></div></div>
             <div id="tool-catalog" class="tool-catalog empty-state">正在读取工具定义…</div>
-            <div class="decision-key" aria-label="三级处置说明">
-              <div class="allow"><b>Allow</b><span>满足任务授权和资源边界，允许进入执行阶段。</span></div>
-              <div class="ask"><b>Ask</b><span>冻结参数，等待用户明确批准或拒绝。</span></div>
-              <div class="deny"><b>Deny</b><span>命中硬拒绝或高风险组合，执行前阻断。</span></div>
-            </div>
           </section>
         </div>
       </section>

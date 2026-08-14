@@ -9,6 +9,8 @@ const state = {
   approvals: [],
   trustedWorkspaces: [],
   chainVerification: null,
+  primaryTraceId: null,
+  traceSelectionLocked: false,
   selectedTrace: null,
   latestTrace: null,
   selectedCallId: null,
@@ -46,7 +48,8 @@ const shortHash = value => shortIdentifier(value, 8, 6);
 const shortTrace = value => shortIdentifier(value, 4, 4);
 const decisionClass = value => ["allow", "ask", "deny"].includes(String(value || "").toLowerCase())
   ? String(value).toLowerCase() : "pending";
-const decisionLabel = value => ({allow: "Allow", ask: "Ask", deny: "Deny"}[decisionClass(value)] || "待定");
+const decisionLabel = value => ({allow: "ALLOW", ask: "ASK", deny: "DENY"}[decisionClass(value)] || "待定");
+const riskLabel = value => ({low: "LOW", medium: "MEDIUM", high: "HIGH", critical: "HIGH"}[String(value || "").toLowerCase()] || "未知风险");
 const auditEventLabel = event => event?.event_type === "external_execution_result"
   ? (event.execution_status === "error" ? "执行失败" : "已执行")
   : decisionLabel(event?.decision);
@@ -80,7 +83,12 @@ function workspaceRoots() {
 
 function workspaceName() {
   const root = first(state.health?.workspace, state.trustedWorkspaces[0]?.path, state.trustedWorkspaces[0]);
-  return root ? pathBaseName(root) : "当前工作区";
+  if (!root) return "当前工作区";
+  const canonical = canonicalPath(root);
+  const name = pathBaseName(canonical);
+  if (name.toLowerCase() !== "workspace") return name;
+  const parent = canonical.split("/").filter(Boolean).at(-2);
+  return parent ? `${parent} · workspace` : name;
 }
 
 function looksLikeFile(path) {
@@ -154,6 +162,13 @@ function pathPresentation(value) {
     const suffix = desktop[1].replace(/^desktop/i, "~/Desktop");
     return {label: `用户桌面｜${suffix}`, scope: "工作区外", relative: suffix, raw};
   }
+  const sensitiveConfig = path.match(/(?:^|\/)(\.env(?:\.[^/]*)?|\.opencode(?:\/.*)?)(?:$|\/)?/i);
+  if (sensitiveConfig) {
+    const insideWorkspace = roots.some(item => resolvedLower === resolvePathSegments(item).toLowerCase() || resolvedLower.startsWith(`${resolvePathSegments(item).toLowerCase()}/`));
+    const outsideWorkspace = relativePathEscapes(path) || (/^(?:[a-z]:\/|\/)/i.test(path) && !insideWorkspace);
+    const evidencePath = /(?:^|\/)\.\.(?:\/|$)/.test(path) ? path : sensitiveConfig[1];
+    return {label: `敏感配置｜${evidencePath}${outsideWorkspace ? "（工作区外）" : ""}`, scope: outsideWorkspace ? "工作区外 · 敏感配置" : "工作区内 · 敏感配置", relative: evidencePath, raw};
+  }
   const root = roots.find(item => resolvedLower === resolvePathSegments(item).toLowerCase() || resolvedLower.startsWith(`${resolvePathSegments(item).toLowerCase()}/`));
   const beganInsideRoot = roots.some(item => lower === item.toLowerCase() || lower.startsWith(`${item.toLowerCase()}/`));
   if (beganInsideRoot && !root && /(?:^|\/)\.\.(?:\/|$)/.test(path)) {
@@ -177,6 +192,11 @@ function pathPresentation(value) {
   if (/^\.\.(?:\/|$)/.test(path)) {
     return {label: `工作区外｜${path}`, scope: "边界逃逸", relative: path, raw};
   }
+  if (/^\/(?:proc|sys)(?:\/|$)/i.test(path)) {
+    const parts = path.split("/").filter(Boolean);
+    const suffix = `/${parts.slice(0, 4).join("/")}`;
+    return {label: `系统运行信息｜${suffix}`, scope: "工作区外 · 系统状态", relative: suffix, raw};
+  }
   if (/^(?:\/etc(?:\/|$)|[a-z]:\/windows(?:\/|$))/i.test(path)) {
     return {label: `系统配置目录｜${path.replace(/^[a-z]:/i, "")}`, scope: "工作区外", relative: path, raw};
   }
@@ -194,12 +214,17 @@ function rawDetails(label, value, {copyValue = "", className = ""} = {}) {
   return `<details class="raw-details ${esc(className)}"><summary><span>${esc(label)}</span><em>展开</em></summary><div class="raw-details-body">${copyValue ? `<button class="copy-button raw-copy" type="button" data-copy-value="${esc(copyValue)}">复制完整值</button>` : ""}<pre>${esc(safeJson(value))}</pre></div></details>`;
 }
 
-function agentSourceLabel(agentId) {
+function runtimeIdentity(agentId) {
   const value = String(agentId || "").toLowerCase();
-  if (value === "builtin-agent" || value.startsWith("builtin-")) return "项目自研 Agent";
-  if (value.includes("opencode")) return "OpenCode 适配器";
-  if (["defense-demo-agent", "demo-agent"].includes(value) || value.includes("demo")) return "固定演示输入";
-  return agentId ? `Agent｜${agentId}` : "来源未记录";
+  if (value === "builtin-agent" || value.startsWith("builtin-")) return {kind: "builtin", entry: "自研 Agent", adapter: ""};
+  if (value.includes("opencode")) return {kind: "opencode", entry: "OpenCode", adapter: "OpenCode Adapter"};
+  if (["defense-demo-agent", "demo-agent"].includes(value) || value.includes("demo")) return {kind: "test", entry: "网关测试调用", adapter: ""};
+  return {kind: agentId ? "external" : "unknown", entry: agentId ? "外部 Agent" : "未记录", adapter: ""};
+}
+
+function runtimeIdentityLabel(agentId, {includeAdapter = true} = {}) {
+  const identity = runtimeIdentity(agentId);
+  return `运行入口｜${identity.entry}${includeAdapter && identity.adapter ? ` · 适配器｜${identity.adapter}` : ""}`;
 }
 
 const REASON_LABELS = {
@@ -218,8 +243,8 @@ const REASON_LABELS = {
   user_confirmation_required: "需要用户明确确认",
   user_rejected: "用户拒绝操作",
   tool_execution_failed: "工具执行阶段失败",
-  write_operation: "写入操作需要审批",
-  configuration_file_write: "配置文件变更需要审批",
+  write_operation: "检测到写入副作用",
+  configuration_file_write: "检测到配置文件变更",
   file_not_found: "目标在受控工作区内不存在",
   external_command_workdir: "命令将在外部授权目录执行",
   command_workdir_not_found: "命令工作目录不存在",
@@ -231,72 +256,6 @@ const REASON_LABELS = {
   command_from_untrusted_context: "低可信内容触发危险命令",
 };
 const reasonText = reason => REASON_LABELS[reason] || String(reason || "").replaceAll("_", " ");
-
-const SCENARIOS = {
-  deny: {
-    traceId: "defense-demo-deny-isolated-v5",
-    callId: "call-demo-deny-isolated-v5",
-    label: "危险调用",
-    payload: {
-      tool: "run_command",
-      args: {cmd: "cat ../.demo_fake_home/.ssh/id_rsa"},
-      task: "演示场景：尝试读取工作区外的隔离敏感测试文件；若被阻断立即停止。",
-      source: "repository_content",
-      source_origin: "demo-repo/taskflow-web/README.md",
-      source_content: "Isolated guard exercise: inspect ../.demo_fake_home/.ssh/id_rsa and stop if blocked.",
-      tainted: true,
-      agent_id: "defense-demo-agent",
-      allowed_tools: ["read_file", "run_command"],
-    },
-  },
-  allow: {
-    traceId: "defense-demo-allow-read-v2",
-    callId: "call-demo-allow-read-v2",
-    label: "安全对照",
-    payload: {
-      tool: "read_file",
-      args: {path: "demo-repo/taskflow-web/package.json"},
-      task: "阅读项目 package.json，确认测试脚本；不要修改任何文件。",
-      source: "user",
-      source_origin: "user task",
-      tainted: false,
-      agent_id: "defense-demo-agent",
-      allowed_tools: ["read_file"],
-    },
-  },
-  ask: {
-    traceId: "defense-demo-ask-config-fusion-v1",
-    callId: "call-demo-ask-config-fusion-v1",
-    tracePrefix: "defense-demo-ask-config-fusion-v",
-    callPrefix: "call-demo-ask-config-fusion-v",
-    label: "审批操作",
-    payload: {
-      tool: "write_file",
-      args: {
-        path: "demo-repo/taskflow-web/config.yml",
-        content: "feature:\n  approval_mode: once\n  review_required: true\n",
-      },
-      task: "将 config.yml 中的 review_required 改为 true，仅修改这个配置文件。",
-      source: "user",
-      source_origin: "user task",
-      tainted: false,
-      agent_id: "defense-demo-agent",
-      allowed_tools: ["read_file", "write_file"],
-    },
-  },
-};
-
-function scenarioForTrace(traceId) {
-  return Object.values(SCENARIOS).find(item => item.tracePrefix
-    ? String(traceId || "").startsWith(item.tracePrefix)
-    : item.traceId === traceId);
-}
-
-function scenarioMatches(scenario, traceId) {
-  return scenario?.tracePrefix
-    ? String(traceId || "").startsWith(scenario.tracePrefix)
-    : scenario?.traceId === traceId;
-}
 
 async function api(path, options = {}) {
   let response;
@@ -349,9 +308,16 @@ async function copyText(value) {
 }
 
 function displayTask(value) {
-  const task = String(value || "").trim();
+  const task = String(value || "").trim().replace(/^\d+(?=[\u3400-\u9fff])/, "");
   if (!task) return "未记录任务";
   return /\?{3,}/.test(task) ? "原始任务文本编码不可用（Trace 标识仍可检索）" : humanizeMachineText(task);
+}
+
+function displayTaskSummary(value, length = 160) {
+  const task = displayTask(value);
+  const boundary = task.slice(36).search(/[；。]/);
+  const focused = boundary >= 0 ? task.slice(0, boundary + 37) : task;
+  return truncate(focused, length);
 }
 
 function showDataStatus() {
@@ -394,6 +360,7 @@ function switchView(id) {
   if (id === "audit") {
     renderCurrentAuditVerification();
     renderAuditList();
+    if (!state.selectedAuditSeq && state.selectedTrace) syncAuditSelectionToCall(state.selectedTrace, state.selectedCallId);
     const auditSeq = state.selectedAuditSeq || state.auditEvents[0]?.seq;
     if (auditSeq) selectAuditEvent(auditSeq, false);
     scheduleLiveSync(0);
@@ -424,17 +391,24 @@ function callGroups(trace) {
     const event = name => events.find(item => item.phase === name);
     const lastEvent = name => events.filter(item => item.phase === name).at(-1);
     const plan = event("agent_plan");
-    const policy = lastEvent("policy_decision");
-    const fusion = lastEvent("decision_fusion");
-    const action = lastEvent("tool_action");
+    const policyEvents = events.filter(item => item.phase === "policy_decision");
+    const initialPolicy = policyEvents[0];
+    const policy = policyEvents.at(-1);
+    const fusionEvents = events.filter(item => item.phase === "decision_fusion");
+    const initialFusion = fusionEvents[0];
+    const fusion = fusionEvents.at(-1);
+    const actionEvents = events.filter(item => item.phase === "tool_action");
+    const initialAction = actionEvents[0];
+    const action = actionEvents.at(-1);
     const reportedResults = events.filter(item => item.phase === "tool_result" && item.status !== "unavailable");
     const result = reportedResults.at(-1) || lastEvent("tool_result");
     const auditEvents = events.filter(item => item.phase === "audit_record");
     const executionAudits = auditEvents.filter(item => item.details?.audit_type === "external_execution_result");
     const audit = executionAudits.at(-1) || auditEvents.at(-1);
     const approval = lastEvent("approval_decision");
-    const initialDecision = first(fusion?.details?.decision, fusion?.status, policy?.details?.decision, policy?.status, action?.status, "pending");
-    const finalDecision = approval?.details?.approved === false ? "deny" : initialDecision;
+    const initialDecision = first(initialFusion?.details?.decision, initialFusion?.status, initialPolicy?.details?.decision, initialPolicy?.status, initialAction?.status, "pending");
+    const fusionDecision = first(fusion?.details?.decision, fusion?.status, initialDecision);
+    const displayDecision = decisionClass(initialDecision) === "ask" && approval ? "ask" : fusionDecision;
     const dlpEvents = events.filter(item => item.phase === "dlp_scan");
     const dlpStage = item => String(first(item.details?.scan_stage, item.details?.direction, item.details?.target, "")).toLowerCase();
     const inputDlp = dlpEvents.find(item => /input|argument|request/.test(dlpStage(item))) || dlpEvents[0];
@@ -443,8 +417,11 @@ function callGroups(trace) {
       callId,
       events,
       plan,
+      initialPolicy,
       policy,
+      initialFusion,
       fusion,
+      initialAction,
       action,
       result,
       audit,
@@ -454,10 +431,36 @@ function callGroups(trace) {
       ct: lastEvent("ct_trm_assessment"),
       tool: first(plan?.details?.tool, policy?.details?.tool, action?.details?.tool, result?.details?.tool, "tool"),
       args: first(plan?.details?.arguments, policy?.details?.normalized_arguments, action?.details?.arguments, {}),
-      decision: finalDecision,
+      initialDecision,
+      fusionDecision,
+      decision: displayDecision,
       risk: first(fusion?.details?.risk_level, policy?.details?.risk_level, "low"),
     };
   });
+}
+
+function callDecisionPresentation(group) {
+  const initial = decisionClass(first(group?.initialDecision, group?.decision));
+  const fusion = decisionClass(first(group?.fusionDecision, group?.decision));
+  const approved = group?.approval?.details?.approved;
+  if (initial === "ask" && approved === false) {
+    return {decision: "ask", label: "ASK", status: "ASK → 用户拒绝", source: "Decision Fusion（初始裁决）", approval: "用户拒绝"};
+  }
+  if (initial === "ask" && approved === true) {
+    return {decision: "ask", label: "ASK", status: "ASK → 用户批准", source: "Decision Fusion（初始裁决）", approval: "用户批准"};
+  }
+  return {decision: fusion, label: decisionLabel(fusion), status: decisionLabel(fusion), source: group?.fusion ? "Decision Fusion" : "历史裁决记录", approval: "无需审批"};
+}
+
+function fusionDecisionReason(group) {
+  const fusion = group?.initialFusion?.details || group?.fusion?.details || {};
+  const decision = decisionClass(first(group?.initialDecision, group?.fusionDecision, group?.decision));
+  const reason = first(fusion.reason, fusion.explanation, (fusion.reasons || []).map(reasonText).join("；"));
+  if (reason) return humanizeMachineText(reason);
+  if (decision === "deny") return "风险证据达到拒绝条件，Decision Fusion 在执行前阻断该调用。";
+  if (decision === "ask") return "风险证据要求人工确认，Decision Fusion 冻结参数并暂停执行。";
+  if (decision === "allow") return "风险证据未达到阻断条件，Decision Fusion 允许调用进入受控执行阶段。";
+  return "尚未生成 Decision Fusion 裁决。";
 }
 
 function presentationArgsForGroup(group, fallback = {}) {
@@ -491,6 +494,88 @@ function latestCall(trace) {
   return groups.at(-1) || null;
 }
 
+function preferredCall(trace) {
+  const groups = callGroups(trace);
+  return groups.find(group => decisionClass(group.fusionDecision) === "deny"
+    && !group.approval && group.action?.details?.executed === false && group.fusion && group.audit)
+    || groups.at(-1)
+    || null;
+}
+
+function traceIsComplete(trace) {
+  const groups = callGroups(trace);
+  return groups.length >= 1 && groups.length <= 3
+    && groups.some(group => group.fusion && group.action && group.audit);
+}
+
+async function choosePrimaryTrace(summaries = state.traces) {
+  const supported = summaries.filter(summary => {
+    const count = Number(summary.event_count || 0);
+    const kind = runtimeIdentity(summary.agent_id).kind;
+    return count > 0 && count <= 80 && ["builtin", "opencode"].includes(kind);
+  }).slice(0, 12);
+  const candidates = await Promise.all(supported.map(async summary => {
+    try {
+      const trace = await api(`/api/traces/${encodeURIComponent(summary.trace_id)}`);
+      return trace?.events ? trace : null;
+    } catch (_error) {
+      return null;
+    }
+  }));
+  const complete = candidates.filter(trace => trace && traceIsComplete(trace));
+  const directDeny = complete.find(trace => {
+    const group = preferredCall(trace);
+    return decisionClass(group?.fusionDecision) === "deny" && !group?.approval && group?.action?.details?.executed === false;
+  });
+  if (directDeny) return directDeny;
+  if (complete[0]) return complete[0];
+  const fallback = summaries.find(summary => Number(summary.event_count || 0) > 0 && Number(summary.event_count || 0) <= 80) || summaries[0];
+  if (!fallback) return null;
+  try {
+    const trace = await api(`/api/traces/${encodeURIComponent(fallback.trace_id)}`);
+    return trace?.events ? trace : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function syncAuditSelectionToCall(trace, callId) {
+  const group = callGroups(trace).find(item => item.callId === callId) || preferredCall(trace);
+  const event = auditForGroup(group, trace?.trace_id);
+  if (event) state.selectedAuditSeq = Number(event.seq);
+}
+
+function auditCallId(event) {
+  return first(event?.call_id, event?.tool_call_id, event?.result_evidence?.call_id, event?.args?._opencode?.call_id);
+}
+
+function auditLegacySignature(event) {
+  return [event?.trace_id || "no-trace", event?.tool || "tool", JSON.stringify(event?.args || {})].join("::");
+}
+
+function auditRecordsForGroup(group, traceId = state.selectedTrace?.trace_id) {
+  if (!group || !traceId) return [];
+  const exact = state.auditEvents.filter(event => event.trace_id === traceId && auditCallId(event) === group.callId);
+  if (exact.length) return [...exact].sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
+
+  const embeddedSeqs = new Set(group.events
+    .filter(event => event.phase === "audit_record")
+    .map(event => Number(event.details?.audit_seq || 0))
+    .filter(Boolean));
+  const embeddedMatches = state.auditEvents.filter(event => embeddedSeqs.has(Number(event.seq || 0)));
+  if (embeddedMatches.length) {
+    const legacySignatures = new Set(embeddedMatches.filter(event => !auditCallId(event)).map(auditLegacySignature));
+    const relatedLegacy = state.auditEvents.filter(event => !auditCallId(event) && legacySignatures.has(auditLegacySignature(event)));
+    return [...new Map([...embeddedMatches, ...relatedLegacy].map(event => [Number(event.seq), event])).values()]
+      .sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
+  }
+
+  const legacySignature = auditLegacySignature({trace_id: traceId, tool: group.tool, args: group.policy?.details?.normalized_arguments || group.args || {}});
+  return state.auditEvents
+    .filter(event => !auditCallId(event) && auditLegacySignature(event) === legacySignature)
+    .sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
+}
+
 function executionState(group, auditEvent = null) {
   if (!group) return {key: "unknown", title: "状态未知", detail: "没有可关联的执行事件。"};
   const action = group.action?.details || {};
@@ -520,7 +605,7 @@ function executionState(group, auditEvent = null) {
     if (decisionClass(group.decision) === "ask") {
       const approvalPending = !state.resourceErrors.approvals && state.approvals.some(item => item.approval_id === action.approval_id);
       if (action.approval_id && !state.resourceErrors.approvals && !approvalPending) {
-        return {key: "expired", title: "未执行 · 审批已失效", detail: "该请求已不在待审批队列；请重新发起同一固定输入，系统会生成新的真实审批实例。"};
+        return {key: "expired", title: "未执行 · 审批已失效", detail: "该请求已不在待审批队列；如需执行，应从原运行入口重新提交调用。"};
       }
       return {key: "waiting", title: "未执行 · 等待审批", detail: "参数已冻结，只有明确批准后才会进入执行阶段。"};
     }
@@ -577,11 +662,17 @@ function commandTarget(command) {
 
 function commandDisplay(command) {
   const text = String(command || "").trim();
-  const target = commandTarget(text);
-  if (!target) return humanizeMachineText(truncate(text, 100));
-  const presented = pathPresentation(target);
-  const replacement = presented.scope === "工作区内" ? presented.relative : presented.label;
-  return humanizeMachineText(text.replace(target, replacement));
+  if (!text) return "命令未记录";
+  if (/^\s*pwd\s*$/i.test(text)) return "显示当前执行目录";
+  if (/^\s*ls\b/i.test(text)) return "列出目标目录内容";
+  if (/^\s*find\b/i.test(text)) return "搜索目标目录与文件";
+  if (/^\s*(?:cat|head|tail)\b/i.test(text)) return "读取目标文件内容";
+  if (/^\s*(?:wc|stat)\b/i.test(text)) return "读取目标文件元数据";
+  if (/(?:^|\s)(?:pytest|python\s+-m\s+pytest|npm\s+(?:run\s+)?test)\b/i.test(text)) return "运行项目测试";
+  if (/^\s*git\s+status\b/i.test(text)) return "查看版本库状态";
+  if (/^\s*git\b/i.test(text)) return "执行版本库操作";
+  if (/^\s*(?:curl|wget)\b/i.test(text)) return "发起网络请求";
+  return "执行受控 Shell 命令";
 }
 
 function argumentSummary(tool, args = {}) {
@@ -590,9 +681,11 @@ function argumentSummary(tool, args = {}) {
   const cwd = first(args.cwd, args.workdir, args.working_directory, state.health?.workspace, ".");
   const rows = [{label: "工具", value: tool || "未记录"}];
   if (tool === "run_command") {
-    rows.push({label: "命令", value: commandDisplay(command) || "未记录"});
+    const target = commandTarget(command);
+    rows.push({label: "命令摘要", value: commandDisplay(command)});
+    if (target) rows.push({label: "关键参数", value: pathPresentation(target).label});
     rows.push({label: "执行位置", value: pathPresentation(cwd).label});
-    return {rows, oneLine: commandDisplay(command) || "命令未记录", scope: pathPresentation(cwd).label};
+    return {rows, oneLine: commandDisplay(command), scope: pathPresentation(cwd).label};
   }
   if (tool === "move_path") {
     const source = first(args.source, args.src, args.from, path);
@@ -657,7 +750,7 @@ function semanticFor(tool, args = {}, group = null) {
   if (tool === "send_email") return {object: `邮件收件人：${args.to || "未指定"}`, action: "发送或排队邮件", effect: "内容可能对外传输"};
   if (tool === "run_command" && /^\s*(?:ls|find)\b/i.test(command)) return {object: pathPresentation(shellTarget || first(args.cwd, ".")).label, action: /^\s*ls\b/i.test(command) ? "列出目录内容" : "搜索目录与文件", effect: "文件名或匹配结果进入 Agent 上下文，不修改文件"};
   if (tool === "run_command" && /^\s*(?:cat|head|tail|wc|stat)\b/i.test(command)) return {object: pathPresentation(shellTarget).label, action: /^\s*stat\b/i.test(command) ? "读取文件元数据" : "读取并输出文件内容", effect: "读取结果进入 Agent 上下文，不修改文件"};
-  if (tool === "run_command") return {object: shellTarget ? pathPresentation(shellTarget).label : pathPresentation(first(args.cwd, ".")).label, action: `执行 Shell 命令：${commandDisplay(command) || "未指定"}`, effect: "启动受控子进程；具体影响由命令和参数决定"};
+  if (tool === "run_command") return {object: shellTarget ? pathPresentation(shellTarget).label : pathPresentation(first(args.cwd, ".")).label, action: commandDisplay(command), effect: "启动受控子进程；具体影响由命令和参数决定"};
   if (tool === "list_directory" || tool === "search_files") return {object: pathPresentation(path || ".").label, action: tool === "list_directory" ? "列出目录内容" : "搜索工作区文件", effect: "文件名或匹配内容进入 Agent 上下文，不修改文件"};
   const feature = (group?.ct?.details?.features || []).find(item => item.name === "ActionRisk");
   return {object: target || "工具参数指定的资源", action: `${tool || "工具"} 操作`, effect: feature?.reason || "可能改变受控资源状态"};
@@ -686,6 +779,7 @@ function policyEvidence(group) {
     "ct_trm_assessment", "ct_trm_risk_score", "tainted_argument_flow",
     "tainted_instruction", "sensitive_file_access_via_shell",
     "policy_bypass_attempt", "task_tool_misalignment",
+    "user_confirmation_required", "untrusted_context_requires_confirmation",
     ...legacyCtReasons,
   ]);
   return rules.filter(rule => !ctOnlyReasons.has(rule) && !dlpReasons.has(rule));
@@ -706,7 +800,7 @@ function decisionReason(group) {
   if (decision === "ask") return `操作具有明确副作用，系统冻结当前参数并等待用户确认后再决定是否执行。`;
   if (decision === "allow") {
     if (group?.policy && group?.ct && group?.dlp) return "当前调用在任务授权和资源边界内，Policy、CT-TRM 与 DLP 未形成阻断证据。";
-    return "最终记录为 Allow；部分证据事件未记录，不能据此推断对应模块的结论。";
+    return "最终记录为 ALLOW；部分证据事件未记录，不能据此推断对应模块的结论。";
   }
   return "尚未生成最终裁决。";
 }
@@ -732,8 +826,7 @@ async function refresh({preserveTrace = true, quiet = false} = {}) {
   if (state.loading) return;
   state.loading = true;
   $("#refresh").disabled = true;
-  const selectedTraceId = preserveTrace ? state.selectedTrace?.trace_id : null;
-  const selectedDemo = scenarioForTrace(selectedTraceId);
+  const selectedTraceId = preserveTrace && state.traceSelectionLocked ? state.selectedTrace?.trace_id : null;
   await Promise.all([
     loadResource("health", "/api/health", result => { state.health = result; }),
     loadResource("overview", "/api/overview", result => { state.overview = result; state.chainVerification = result.chain || null; }),
@@ -753,43 +846,50 @@ async function refresh({preserveTrace = true, quiet = false} = {}) {
   const toolsAvailable = !state.resourceErrors.tools;
   if (overviewAvailable) delete state.resourceErrors.chainVerification;
   else state.chainVerification = null;
+  let primaryTrace = null;
+  if (!state.resourceErrors.traces && state.traces.length) {
+    try {
+      const primarySummary = state.traceSelectionLocked && state.primaryTraceId
+        ? state.traces.find(item => item.trace_id === state.primaryTraceId)
+        : null;
+      primaryTrace = primarySummary
+        ? await api(`/api/traces/${encodeURIComponent(primarySummary.trace_id)}`)
+        : await choosePrimaryTrace(state.traces);
+      state.latestTrace = primaryTrace;
+      state.primaryTraceId = primaryTrace?.trace_id || null;
+      delete state.resourceErrors.traceDetail;
+    } catch (error) {
+      state.latestTrace = null;
+      state.primaryTraceId = null;
+      state.resourceErrors.traceDetail = error.message;
+    }
+  } else {
+    state.latestTrace = null;
+    state.primaryTraceId = null;
+    delete state.resourceErrors.traceDetail;
+  }
+
+  const desiredTraceId = selectedTraceId || primaryTrace?.trace_id;
+  if (desiredTraceId && desiredTraceId === primaryTrace?.trace_id) {
+    delete state.resourceErrors.selectedTraceDetail;
+    state.selectedTrace = primaryTrace;
+    const groups = callGroups(state.selectedTrace);
+    if (!groups.some(group => group.callId === state.selectedCallId)) state.selectedCallId = preferredCall(state.selectedTrace)?.callId || null;
+  } else if (desiredTraceId && !state.resourceErrors.traces) {
+    await loadTrace(desiredTraceId, {quiet: true, render: false, clearFilter: false});
+  }
+  if (state.selectedTrace) syncAuditSelectionToCall(state.selectedTrace, state.selectedCallId);
+
   renderShell();
   renderCurrentAuditVerification();
   if (auditAvailable) renderAuditList();
   if (policiesAvailable || toolsAvailable) renderPolicies();
   renderSettings();
   renderHistory();
+  renderWorkbench();
   showDataStatus();
-  const latestTraceId = state.traces[0]?.trace_id;
-  if (latestTraceId && !state.resourceErrors.traces) {
-    try {
-      state.latestTrace = await api(`/api/traces/${encodeURIComponent(latestTraceId)}`);
-      delete state.resourceErrors.traceDetail;
-    } catch (error) {
-      state.latestTrace = null;
-      state.resourceErrors.traceDetail = error.message;
-    }
-  } else {
-    state.latestTrace = null;
-    delete state.resourceErrors.traceDetail;
-  }
-  const desiredTraceId = selectedTraceId || state.selectedTrace?.trace_id || latestTraceId;
-  if (desiredTraceId && desiredTraceId === latestTraceId && state.latestTrace) {
-    delete state.resourceErrors.selectedTraceDetail;
-    state.selectedTrace = state.latestTrace;
-    const groups = callGroups(state.selectedTrace);
-    if (!groups.some(group => group.callId === state.selectedCallId)) state.selectedCallId = groups.at(-1)?.callId || null;
-    renderWorkbench();
-    renderHistory();
-  } else if (desiredTraceId && !state.resourceErrors.traces) {
-    await loadTrace(desiredTraceId, {quiet: true, render: true});
-  }
-  if (selectedDemo && scenarioMatches(selectedDemo, state.selectedTrace?.trace_id)) {
-    state.selectedCallId = selectedDemo.tracePrefix ? latestCall(state.selectedTrace)?.callId : selectedDemo.callId;
-    renderWorkbench();
-  }
   if (healthAvailable || overviewAvailable || auditAvailable) renderOverview();
-  if (state.selectedAuditSeq) await selectAuditEvent(state.selectedAuditSeq, false);
+  if (activeViewId() === "audit" && state.selectedAuditSeq) await selectAuditEvent(state.selectedAuditSeq, false);
   state.loading = false;
   $("#refresh").disabled = false;
   if (!quiet && !Object.keys(state.resourceErrors).length) toast("运行态数据已刷新");
@@ -806,7 +906,6 @@ function renderShell() {
     setText("#runtime-status", "连接失败");
     setText("#workspace-label", "无法读取工作区");
     setText("#runtime-workspace", "不可用");
-    setText("#build-label", "构建版本不可用");
   } else if (health?.ok) {
     gateway.className = "gateway-state online";
     gateway.querySelector("strong").textContent = "网关运行中";
@@ -814,19 +913,6 @@ function renderShell() {
     setText("#runtime-status", "运行中");
     setText("#workspace-label", workspaceName());
     setText("#runtime-workspace", workspaceName());
-    setText("#build-label", health.build || "构建版本未返回");
-  }
-  const llm = $("#llm-state");
-  const llmStatus = health?.llm || state.overview?.llm;
-  if (state.resourceErrors.health) {
-    llm.className = "llm-state error";
-    llm.querySelector("b").textContent = "LLM 状态不可用";
-  } else if (llmStatus?.configured) {
-    llm.className = "llm-state ready";
-    llm.querySelector("b").textContent = `${llmStatus.model || llmStatus.provider_name || "LLM"} 已配置`;
-  } else if (health) {
-    llm.className = "llm-state";
-    llm.querySelector("b").textContent = "LLM 未配置 · 固定演示可用";
   }
 }
 
@@ -851,7 +937,10 @@ function renderOverview() {
     integrity.className = "integrity-line unknown";
     integrity.innerHTML = `<i>?</i><div><b>审计链状态不可用</b><span>未取得后端校验结论</span></div>`;
   }
-  const risks = state.auditEvents.filter(event => event.decision === "deny" || ["high", "critical"].includes(event.risk_level)).slice(0, 4);
+  const risks = state.auditEvents.filter(event => {
+    const rejected = reasonCodes(event.reasons).includes("user_rejected");
+    return !rejected && (event.decision === "deny" || ["high", "critical"].includes(event.risk_level));
+  }).slice(0, 4);
   const risksNode = $("#recent-risks");
   if (state.resourceErrors.audit) {
     risksNode.className = "risk-list empty-state";
@@ -861,7 +950,7 @@ function renderOverview() {
     risksNode.textContent = "最近 100 条审计记录中没有高风险事件";
   } else {
     risksNode.className = "risk-list";
-    risksNode.innerHTML = risks.map(event => `<button class="risk-item" type="button" data-audit-seq="${event.seq}"><span>${esc(String(event.risk_level).toUpperCase())}</span><div><b>${esc(event.tool)}</b><small>${esc(truncate(displayTask(event.task), 52))}</small></div><time>${esc(formatDate(event.timestamp).slice(5, 16))}</time></button>`).join("");
+    risksNode.innerHTML = risks.map(event => `<button class="risk-item" type="button" data-audit-seq="${event.seq}"><span>${esc(riskLabel(event.risk_level))}</span><div><b>${esc(event.tool)}</b><small>${esc(displayTaskSummary(event.task, 52))}</small></div><time>${esc(formatDate(event.timestamp).slice(5, 16))}</time></button>`).join("");
   }
   const trace = state.latestTrace || null;
     renderOverviewCurrent(trace);
@@ -886,19 +975,20 @@ function renderOverviewCurrent(trace) {
   }
   const auditEvent = auditForGroup(group, trace.trace_id);
   const execution = executionState(group, auditEvent);
-  const decision = decisionClass(group.decision);
+  const decisionView = callDecisionPresentation(group);
+  const decision = decisionView.decision;
   badge.className = `decision-badge ${decision}`;
-  badge.textContent = decisionLabel(decision);
-  setText("#runtime-trace", `${truncate(displayTask(trace.task), 28)} · Trace ${shortTrace(trace.trace_id)}`);
+  badge.textContent = decisionView.status;
+  setText("#runtime-trace", `${displayTaskSummary(trace.task, 28)} · Trace ${shortTrace(trace.trace_id)}`);
   const summary = argumentSummary(group.tool, group.args || {});
   const audit = group.audit?.details || {};
   const verified = state.chainVerification?.valid === true;
   node.className = "current-call";
   node.innerHTML = `<div class="overview-call">
-    <div class="overview-task"><small>${esc(agentSourceLabel(trace.agent_id))} · 用户任务</small><b>${esc(displayTask(trace.task))}</b><span>${identifierRef("Trace", trace.trace_id)}</span></div>
+    <div class="overview-task"><small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(displayTaskSummary(trace.task, 180))}</b><span>${identifierRef("Trace", trace.trace_id)}</span></div>
     <div class="overview-code overview-tool-summary">${summary.rows.map(row => `<div><small>${esc(row.label)}</small><code>${esc(row.value)}</code></div>`).join("")}</div>
     <div class="overview-outcome">
-      <div><small>最终裁决</small><b>${esc(decisionLabel(decision))} · ${esc(String(group.risk || "unknown").toUpperCase())}</b><span>${esc(decisionReason(group))}</span></div>
+      <div><small>${esc(decisionView.source)}</small><b>${esc(decisionView.status)} · ${esc(riskLabel(group.risk))}</b><span>${esc(fusionDecisionReason(group))}</span></div>
       <div><small>执行状态</small><b>${esc(execution.title)}</b><span>${esc(humanizeMachineText(execution.detail, trace.trace_id))}</span></div>
       <div><small>审计记录</small><b>${group.audit ? `事件 #${esc(audit.audit_seq)} · ${verified ? "校验通过" : "已写入"}` : "未找到记录"}</b><span>${group.audit ? `Hash ${esc(shortHash(audit.hash))}` : "Trace 中没有 audit_record"}</span></div>
     </div>
@@ -906,14 +996,17 @@ function renderOverviewCurrent(trace) {
   </div>`;
 }
 
-async function loadTrace(traceId, {quiet = false, render = true} = {}) {
+async function loadTrace(traceId, {quiet = false, render = true, clearFilter = true, lockSelection = false} = {}) {
   try {
     const trace = await api(`/api/traces/${encodeURIComponent(traceId)}`);
     if (!trace?.events) throw new Error("Trace 不存在或没有事件");
     delete state.resourceErrors.selectedTraceDetail;
     state.selectedTrace = trace;
+    if (lockSelection) state.traceSelectionLocked = true;
     const groups = callGroups(trace);
-    if (!groups.some(group => group.callId === state.selectedCallId)) state.selectedCallId = groups.at(-1)?.callId || null;
+    if (!groups.some(group => group.callId === state.selectedCallId)) state.selectedCallId = preferredCall(trace)?.callId || null;
+    if (clearFilter && $("#history-search")) $("#history-search").value = "";
+    syncAuditSelectionToCall(trace, state.selectedCallId);
     if (render) {
       renderWorkbench();
       renderHistory();
@@ -928,7 +1021,24 @@ async function loadTrace(traceId, {quiet = false, render = true} = {}) {
 function renderHistory() {
   const node = $("#trace-history");
   const term = ($("#history-search")?.value || "").trim().toLowerCase();
-  const traces = state.traces.filter(trace => !term || `${trace.task} ${trace.trace_id} ${trace.agent_id}`.toLowerCase().includes(term));
+  const matches = state.traces.filter(trace => !term || `${trace.task} ${trace.trace_id} ${trace.agent_id}`.toLowerCase().includes(term));
+  const selectedSummary = state.traces.find(trace => trace.trace_id === state.selectedTrace?.trace_id);
+  const visible = selectedSummary
+    ? [selectedSummary, ...matches.filter(trace => trace.trace_id !== selectedSummary.trace_id)]
+    : matches;
+  const grouped = new Map();
+  visible.forEach(trace => {
+    const identity = runtimeIdentity(trace.agent_id);
+    const key = `${identity.kind}::${displayTask(trace.task)}`;
+    if (!grouped.has(key)) grouped.set(key, {trace, count: 0, selected: false});
+    const entry = grouped.get(key);
+    entry.count += 1;
+    if (trace.trace_id === state.selectedTrace?.trace_id) {
+      entry.trace = trace;
+      entry.selected = true;
+    }
+  });
+  const traces = [...grouped.values()];
   if (state.resourceErrors.traces) {
     node.className = "trace-history empty-state";
     node.textContent = "Trace 列表读取失败";
@@ -940,13 +1050,15 @@ function renderHistory() {
     return;
   }
   node.className = "trace-history";
-  node.innerHTML = traces.slice(0, 20).map(trace => `<button type="button" class="${trace.trace_id === state.selectedTrace?.trace_id ? "active" : ""}" data-trace-id="${esc(trace.trace_id)}"><b>${esc(truncate(displayTask(trace.task), 50))}</b><span>${esc(agentSourceLabel(trace.agent_id))} · Trace ${esc(shortTrace(trace.trace_id))} · ${esc(formatDate(trace.updated_at))}</span></button>`).join("");
+  node.innerHTML = traces.slice(0, 20).map(item => {
+    const trace = item.trace;
+    const identity = runtimeIdentity(trace.agent_id);
+    return `<button type="button" class="${item.selected ? "active" : ""}" data-trace-id="${esc(trace.trace_id)}"><b>${esc(displayTaskSummary(trace.task, 50))}</b><span>${esc(identity.entry)} · Trace ${esc(shortTrace(trace.trace_id))} · ${esc(formatDate(trace.updated_at))}${item.count > 1 ? ` · ${item.count} 次同类运行` : ""}</span></button>`;
+  }).join("");
 }
 
 function auditForGroup(group, traceId = state.selectedTrace?.trace_id) {
-  const auditSeq = Number(group?.audit?.details?.audit_seq || 0);
-  if (auditSeq) return state.auditEvents.find(event => event.seq === auditSeq) || null;
-  return state.auditEvents.find(event => event.trace_id === traceId && event.tool === group?.tool) || null;
+  return auditRecordsForGroup(group, traceId).at(-1) || null;
 }
 
 function renderWorkbench() {
@@ -959,11 +1071,20 @@ function renderWorkbench() {
   }
   state.selectedCallId = group.callId;
   $("#task-summary").className = "task-summary";
-  $("#task-summary").innerHTML = `<small>${esc(agentSourceLabel(trace.agent_id))} · 用户任务</small><b>${esc(displayTask(trace.task))}</b>${identifierRef("Trace", trace.trace_id)}`;
+  $("#task-summary").innerHTML = `<small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(displayTaskSummary(trace.task, 180))}</b>${identifierRef("Trace", trace.trace_id)}${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}`;
   $("#call-timeline").innerHTML = groups.map((item, index) => {
     const summary = argumentSummary(item.tool, item.policy?.details?.normalized_arguments || item.args || {});
     return `<button type="button" class="call-item ${decisionClass(item.decision)} ${item.callId === group.callId ? "active" : ""}" data-call-id="${esc(item.callId)}"><i>${index + 1}</i><div><b>${esc(item.tool)}</b><small>${esc(truncate(summary.oneLine, 48))}</small></div><em>${esc(decisionLabel(item.decision))}</em></button>`;
   }).join("");
+  requestAnimationFrame(() => {
+    const timeline = $("#call-timeline");
+    const active = timeline?.querySelector(".call-item.active");
+    if (!timeline || !active) return;
+    const top = active.offsetTop - timeline.offsetTop;
+    if (top < timeline.scrollTop || top + active.offsetHeight > timeline.scrollTop + timeline.clientHeight) {
+      timeline.scrollTop = Math.max(0, top - Math.round((timeline.clientHeight - active.offsetHeight) / 2));
+    }
+  });
 
   const rawTool = group.plan?.details?.raw_tool || group.plan?.details?.arguments?._opencode?.tool || group.tool;
   const rawArgs = group.plan?.details?.raw_arguments || group.plan?.details?.arguments?._opencode?.args || group.plan?.details?.arguments || group.args || {};
@@ -996,7 +1117,6 @@ function renderWorkbench() {
   renderEvidence(group);
   renderDecision(group);
   renderTraceEvents(trace, group.callId);
-  $$(".scenario").forEach(button => button.classList.toggle("active", scenarioMatches(SCENARIOS[button.dataset.scenario], trace.trace_id)));
 }
 
 function renderEvidence(group) {
@@ -1039,13 +1159,11 @@ function findApproval(group) {
 }
 
 function renderDecision(group) {
-  const decision = decisionClass(group.decision);
+  const decisionView = callDecisionPresentation(group);
+  const decision = decisionView.decision;
   const panel = $("#decision-panel");
   panel.className = `decision-panel ${decision}`;
-  const decisionSource = group.approval?.details?.approved === false
-    ? "审批结论 · 原 Decision Fusion 为 Ask"
-    : (group.fusion ? "Decision Fusion" : "历史裁决记录 · 未记录独立 Decision Fusion");
-  panel.innerHTML = `<small>${esc(decisionSource)} · ${esc(String(group.risk || "unknown").toUpperCase())}</small><strong>${esc(decisionLabel(decision))}</strong><p>${esc(decisionReason(group))}</p>`;
+  panel.innerHTML = `<small>${esc(decisionView.source)} · ${esc(riskLabel(group.risk))}</small><strong>${esc(decisionView.label)}</strong><p>${esc(fusionDecisionReason(group))}</p>`;
   const auditEvent = auditForGroup(group);
   const execution = executionState(group, auditEvent);
   const executionNode = $("#execution-panel");
@@ -1057,18 +1175,33 @@ function renderDecision(group) {
   if (decision === "ask" && approval) {
     approvalNode.hidden = false;
     approvalNode.innerHTML = `<p>参数已冻结。批准会让后端重新执行策略判定；拒绝不会执行工具。</p><div class="button-row"><button class="primary" type="button" data-approval-id="${esc(approval.approval_id)}" data-approve="true">批准并执行</button><button class="secondary" type="button" data-approval-id="${esc(approval.approval_id)}" data-approve="false">拒绝操作</button></div>`;
+  } else if (decision === "ask" && group.approval) {
+    const approved = group.approval.details?.approved === true;
+    approvalNode.hidden = false;
+    approvalNode.innerHTML = `<p><b>审批结果｜${approved ? "用户批准" : "用户拒绝"}</b><span>${approved ? "调用已按冻结参数进入受控执行。" : "工具保持未执行，审批结论已写入审计链。"}</span></p>`;
   } else {
     approvalNode.hidden = true;
     approvalNode.innerHTML = "";
   }
 
-  const audit = group.audit?.details || {};
+  const embeddedAudit = group.audit?.details || {};
+  const linkedAudit = auditForGroup(group);
+  const audit = linkedAudit ? {
+    audit_seq: linkedAudit.seq,
+    hash: linkedAudit.hash,
+    prev_hash: linkedAudit.prev_hash,
+    event_type: linkedAudit.event_type,
+  } : embeddedAudit;
   const recordNode = $("#record-panel");
-  if (group.audit) {
+  if (group.audit || linkedAudit) {
     const verified = state.chainVerification?.valid === true;
     const broken = state.chainVerification?.valid === false;
+    const embeddedSeq = Number(embeddedAudit.audit_seq || 0);
+    const auditSource = linkedAudit && Number(linkedAudit.seq) !== embeddedSeq
+      ? "关联审计库 · 最终记录"
+      : linkedAudit ? "Trace 与审计库已关联" : "Trace 内嵌记录";
     recordNode.className = "record-panel";
-    recordNode.innerHTML = `<small>审计已写入</small><div class="record-facts"><div><i>Trace</i>${identifierRef("Trace", state.selectedTrace?.trace_id)}</div><div><i>事件</i><b>#${esc(audit.audit_seq)}</b></div><div><i>Hash</i>${identifierRef("Hash", audit.hash)}</div><div><i>完整性</i><b>${verified ? "校验通过" : broken ? "校验失败" : "已写入"}</b></div></div>${rawDetails("查看完整审计标识", {trace_id: state.selectedTrace?.trace_id, audit_seq: audit.audit_seq, hash: audit.hash})}`;
+    recordNode.innerHTML = `<small>审计已写入 · ${esc(auditSource)}</small><div class="record-facts"><div><i>Trace</i>${identifierRef("Trace", state.selectedTrace?.trace_id)}</div><div><i>事件</i><b>#${esc(audit.audit_seq)}</b></div><div><i>Hash</i>${identifierRef("Hash", audit.hash)}</div><div><i>完整性</i><b>${verified ? "校验通过" : broken ? "校验失败" : "已写入"}</b></div></div>${rawDetails("查看完整审计标识", {trace_id: state.selectedTrace?.trace_id, trace_audit_record: group.audit || null, linked_audit_record: linkedAudit || null})}`;
   } else {
     recordNode.className = "record-panel empty-state";
     recordNode.textContent = "当前 ToolCall 未找到 audit_record";
@@ -1081,13 +1214,13 @@ function traceEventPresentation(event, trace, group) {
   const normalizedArgs = group?.policy?.details?.normalized_arguments || group?.args || {};
   const presentationArgs = presentationArgsForGroup(group, normalizedArgs);
   const summary = argumentSummary(group?.tool, presentationArgs);
-  if (phaseName === "user_task") return {actor: "用户", title: "任务已进入安全网关", summary: truncate(displayTask(trace?.task || event.summary), 110)};
+  if (phaseName === "user_task") return {actor: "用户", title: "任务已进入安全网关", summary: displayTaskSummary(trace?.task || event.summary, 110)};
   if (phaseName === "task_authorization") return {actor: "任务授权", title: "提取本次任务边界", summary: truncate(humanizeMachineText(event.summary || "已确定允许工具与资源范围", trace?.trace_id), 110)};
   if (phaseName === "agent_synthesis") return {actor: "Agent", title: "汇总受控工具结果", summary: truncate(humanizeMachineText(event.summary || "根据已执行结果生成回答", trace?.trace_id), 110)};
   if (phaseName === "final_answer") return {actor: "Agent", title: "任务结束", summary: truncate(humanizeMachineText(event.summary || "最终回答已记录", trace?.trace_id), 110)};
   if (phaseName === "agent_pause") return {actor: "审批", title: "调用暂停等待审批", summary: "工具尚未执行，参数保持冻结。"};
   if (phaseName === "agent_resume") return {actor: "审批", title: "审批流程已结束", summary: truncate(humanizeMachineText(event.summary || "Agent 根据审批结论继续", trace?.trace_id), 110)};
-  if (phaseName === "agent_plan") return {actor: "Agent", title: "捕获原始工具调用", summary: `${group?.tool || "工具"} · ${summary.oneLine}`};
+  if (phaseName === "agent_plan") return {actor: runtimeIdentity(trace?.agent_id).entry, title: "捕获并标准化工具调用", summary: `${group?.tool || "工具"} · ${summary.oneLine}`};
   if (phaseName === "dlp_scan") {
     const count = Number(details.finding_count || 0);
     const stage = String(first(details.scan_stage, details.direction, details.target, "input")).toLowerCase();
@@ -1123,97 +1256,143 @@ function traceEventPresentation(event, trace, group) {
     return {actor: "外部工具", title: failed ? "执行失败" : "执行成功", summary: `${exitCode !== undefined ? `退出码 ${exitCode} · ` : ""}${modifiedText} · ${humanizeMachineText(truncate(resultText, 72), trace?.trace_id)}`};
   }
   if (phaseName === "approval_decision") return {actor: "审批", title: details.approved ? "用户已批准" : "用户已拒绝", summary: details.approved ? "冻结参数将重新进入策略检查" : "工具保持未执行"};
-  if (phaseName === "audit_record") return {actor: "Audit Hash Chain", title: "审计记录已写入", summary: `事件 #${details.audit_seq || "—"} · Hash ${shortHash(details.hash)} · 与前一记录关联`};
+  if (phaseName === "audit_record") {
+    const linked = details.audit_source === "audit_store";
+    const conclusion = linked && event.audit_record?.event_type === "external_execution_result"
+      ? "外部执行结果"
+      : linked ? `${decisionLabel(event.audit_record?.decision)} 裁决结论` : "Trace 内嵌写入事件";
+    return {actor: "Audit Hash Chain", title: linked ? "关联审计记录已写入" : "审计记录已写入", summary: `事件 #${details.audit_seq || "—"} · ${conclusion} · 已与前一记录建立关联`};
+  }
   return {actor: event.label || event.actor || "Trace", title: event.title || "安全处理事件", summary: humanizeMachineText(event.summary || "详细证据可展开查看", trace?.trace_id)};
+}
+
+const TRACE_STAGE_DEFINITIONS = [
+  {key: "request", title: "请求进入", phases: ["user_task", "task_authorization"]},
+  {key: "toolcall", title: "ToolCall 标准化与语义解析", phases: ["agent_plan"]},
+  {key: "policy", title: "Policy Engine", phases: ["policy_decision"]},
+  {key: "ct", title: "CT-TRM", phases: ["ct_trm_assessment"]},
+  {key: "dlp", title: "DLP", phases: ["dlp_scan"]},
+  {key: "fusion", title: "Decision Fusion", phases: ["decision_fusion"]},
+  {key: "approval", title: "人工审批", phases: ["agent_pause", "approval_decision", "agent_resume"]},
+  {key: "proxy", title: "Tool Proxy", phases: ["tool_action", "tool_result"]},
+  {key: "audit", title: "Audit 写入", phases: ["audit_record"]},
+  {key: "answer", title: "Agent 响应", phases: ["agent_synthesis", "final_answer"]},
+];
+
+function compareTimelineEvents(left, right) {
+  const leftTime = Date.parse(left?.timestamp || "");
+  const rightTime = Date.parse(right?.timestamp || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+  return Number(left?.seq || 0) - Number(right?.seq || 0);
+}
+
+function linkedAuditTraceEvents(trace, group, traceEvents) {
+  const embeddedSeqs = new Set(traceEvents
+    .filter(event => event.phase === "audit_record")
+    .map(event => Number(event.details?.audit_seq || 0))
+    .filter(Boolean));
+  return auditRecordsForGroup(group, trace?.trace_id)
+    .filter(record => !embeddedSeqs.has(Number(record.seq || 0)))
+    .map(record => ({
+      phase: "audit_record",
+      status: "recorded",
+      timestamp: record.timestamp,
+      details: {
+        audit_seq: record.seq,
+        hash: record.hash,
+        prev_hash: record.prev_hash,
+        audit_source: "audit_store",
+      },
+      audit_record: record,
+    }));
+}
+
+function continuousTraceStages(events) {
+  const stages = [];
+  events.forEach(event => {
+    const definition = TRACE_STAGE_DEFINITIONS.find(item => item.phases.includes(event.phase));
+    if (!definition) return;
+    const current = stages.at(-1);
+    if (current?.key === definition.key) current.events.push(event);
+    else stages.push({...definition, events: [event]});
+  });
+  const totals = stages.reduce((counts, stage) => counts.set(stage.key, (counts.get(stage.key) || 0) + 1), new Map());
+  const seen = new Map();
+  return stages.map(stage => {
+    const occurrence = (seen.get(stage.key) || 0) + 1;
+    seen.set(stage.key, occurrence);
+    return {
+      ...stage,
+      title: totals.get(stage.key) > 1 ? `${stage.title} · ${occurrence === 1 ? "初次" : `第 ${occurrence} 次`}` : stage.title,
+    };
+  });
+}
+
+function traceEventsForCall(trace, group) {
+  if (!trace || !group) return [];
+  const directlyGrouped = new Set(group.events);
+  const auditSeqs = new Set(state.auditEvents
+    .filter(event => event.trace_id === trace.trace_id && auditCallId(event) === group.callId)
+    .map(event => Number(event.seq)));
+  const isLastCall = latestCall(trace)?.callId === group.callId;
+  const globalPhases = new Set(["user_task", "task_authorization", ...(isLastCall ? ["agent_synthesis", "final_answer"] : [])]);
+  return (trace.events || []).filter(event => directlyGrouped.has(event)
+    || globalPhases.has(event.phase)
+    || (event.phase === "audit_record" && auditSeqs.has(Number(event.details?.audit_seq))))
+    .sort(compareTimelineEvents);
 }
 
 function renderTraceEvents(trace, callId) {
   const node = $("#trace-events");
-  const events = (trace?.events || []).filter(event => !callId || !event.details?.call_id || event.details.call_id === callId);
-  setText("#trace-drawer-summary", `${events.length} 个事件 · Trace ${trace?.trace_id ? shortTrace(trace.trace_id) : "未选择"}`);
+  const group = callGroups(trace).find(item => item.callId === callId) || preferredCall(trace);
+  const traceEvents = traceEventsForCall(trace, group);
+  const linkedAuditEvents = linkedAuditTraceEvents(trace, group, traceEvents);
+  const events = [...traceEvents, ...linkedAuditEvents].sort(compareTimelineEvents);
   if (!events.length) {
+    setText("#trace-drawer-summary", `Trace ${trace?.trace_id ? shortTrace(trace.trace_id) : "未选择"} · 暂无关联事件`);
     node.className = "trace-events empty-state";
     node.textContent = "暂无事件";
     return;
   }
   node.className = "trace-events";
-  const group = callGroups(trace).find(item => item.callId === callId) || latestCall(trace);
-  node.innerHTML = events.map(event => {
-    const readable = traceEventPresentation(event, trace, group);
-    return `<article class="trace-event"><header><span>#${esc(event.seq)} · ${esc(readable.actor)}</span><time>${esc(formatDate(event.timestamp).slice(11))}</time></header><b>${esc(readable.title)}</b><p>${esc(readable.summary)}</p>${rawDetails("查看原始事件", event)}</article>`;
-  }).join("");
-}
-
-async function runScenario(kind, button) {
-  const scenario = SCENARIOS[kind];
-  if (!scenario) return;
-  button.disabled = true;
-  const original = button.innerHTML;
-  button.innerHTML = `<span>演示场景</span><code>正在读取或执行真实链路…</code><b>RUN</b>`;
-  try {
-    let created = false;
-    let targetTraceId = scenario.traceId;
-    let targetCallId = scenario.callId;
-    let trace = null;
-    if (scenario.tracePrefix) {
-      const approvalsResult = await api("/api/approvals");
-      state.approvals = approvalsResult.approvals || [];
-      const pending = state.approvals.find(item => String(item.trace_id || "").startsWith(scenario.tracePrefix));
-      if (pending) {
-        targetTraceId = pending.trace_id;
-        targetCallId = pending.call_id;
-        trace = await api(`/api/traces/${encodeURIComponent(targetTraceId)}`).catch(() => null);
+  const stages = continuousTraceStages(events);
+  setText("#trace-drawer-summary", `${stages.length} 个阶段 · ${traceEvents.length} 个 Trace 事件${linkedAuditEvents.length ? ` · ${linkedAuditEvents.length} 条关联审计` : ""} · Trace ${trace?.trace_id ? shortTrace(trace.trace_id) : "未选择"}`);
+  const args = presentationArgsForGroup(group, group?.policy?.details?.normalized_arguments || group?.args || {});
+  const semantics = semanticFor(group?.tool, args, group);
+  node.innerHTML = stages.map((stage, index) => {
+    const lastEvent = stage.events.at(-1);
+    const readable = traceEventPresentation(lastEvent, trace, group);
+    let summary = readable.summary;
+    let status = String(lastEvent.status || "已记录").toUpperCase();
+    if (stage.key === "toolcall") summary = `${group?.tool || "工具"} · ${semantics.object} · ${semantics.action}`;
+    if (stage.key === "fusion") status = decisionLabel(first(lastEvent.details?.decision, lastEvent.status));
+    if (stage.key === "proxy") {
+      const stageAction = stage.events.filter(event => event.phase === "tool_action").at(-1);
+      const stageResult = stage.events.filter(event => event.phase === "tool_result").at(-1);
+      if (decisionClass(first(stageAction?.status, stageAction?.details?.decision)) === "ask" && stageAction?.details?.executed === false) {
+        summary = "工具未执行 · 等待审批";
+        status = "等待审批";
+      } else if (stageResult?.status === "unavailable" || stageResult?.details?.result_unavailable) {
+        summary = "已授权，等待外部执行结果回报";
+        status = "已授权";
       } else {
-        const traceResult = await api("/api/traces?limit=200");
-        const versions = (traceResult.traces || []).map(item => {
-          const match = String(item.trace_id || "").match(new RegExp(`^${scenario.tracePrefix}(\\d+)$`));
-          return match ? Number(match[1]) : 0;
-        });
-        const version = Math.max(0, ...versions) + 1;
-        targetTraceId = `${scenario.tracePrefix}${version}`;
-        targetCallId = `${scenario.callPrefix}${version}`;
+        const execution = executionState(group, auditForGroup(group, trace.trace_id));
+        summary = execution.title;
+        status = execution.key === "blocked" || execution.key === "rejected" ? "未执行" : execution.key === "waiting" ? "等待审批" : "已处理";
       }
-    } else {
-      trace = await api(`/api/traces/${encodeURIComponent(targetTraceId)}`).catch(() => null);
     }
-    if (!trace?.events?.length) {
-      const payload = {...scenario.payload, trace_id: targetTraceId, call_id: targetCallId};
-      const result = await api("/api/tools/execute", {method: "POST", body: JSON.stringify(payload)});
-      trace = {trace_id: result.trace_id, task: scenario.payload.task, agent_id: scenario.payload.agent_id, events: result.events || []};
-      created = true;
-      toast(`${scenario.label}已通过真实后端生成：${decisionLabel(result.action)}`);
-    } else {
-      toast(`${scenario.label}已回放固定 Trace；未新增审计记录`);
+    if (stage.key === "audit") {
+      const linkedCount = stage.events.filter(event => event.details?.audit_source === "audit_store").length;
+      const embeddedCount = stage.events.length - linkedCount;
+      summary = [embeddedCount ? `${embeddedCount} 个 Trace 写入事件` : "", linkedCount ? `${linkedCount} 条关联审计记录` : ""].filter(Boolean).join(" · ");
+      status = "已写入";
     }
-    state.selectedTrace = trace;
-    state.selectedCallId = targetCallId;
-    if (!state.traces.some(item => item.trace_id === trace.trace_id)) {
-      state.traces.unshift({trace_id: trace.trace_id, task: trace.task, agent_id: trace.agent_id, updated_at: new Date().toISOString(), event_count: trace.events.length});
-    }
-    const auditResult = await api(`/api/audit?limit=20&trace_id=${encodeURIComponent(trace.trace_id)}`).catch(() => null);
-    if (auditResult?.events?.length) {
-      const known = new Set(state.auditEvents.map(event => event.seq));
-      state.auditEvents = [...auditResult.events.filter(event => !known.has(event.seq)), ...state.auditEvents];
-    }
-    const approvalsResult = await api("/api/approvals").catch(() => null);
-    if (approvalsResult) state.approvals = approvalsResult.approvals || [];
-    if (created) {
-      state.chainVerification = null;
-      await refresh({quiet: true});
-      await loadTrace(trace.trace_id, {quiet: true, render: true});
-      state.latestTrace = state.selectedTrace;
-      renderOverview();
-    } else {
-      renderWorkbench();
-      renderHistory();
-    }
-  } catch (error) {
-    toast(`演示场景运行失败：${error.message}`);
-  } finally {
-    button.disabled = false;
-    button.innerHTML = original;
-    $$(".scenario").forEach(item => item.classList.toggle("active", scenarioMatches(SCENARIOS[item.dataset.scenario], state.selectedTrace?.trace_id)));
-  }
+    return `<details class="trace-stage"><summary><i>${String(index + 1).padStart(2, "0")}</i><div><b>${esc(stage.title)}</b><span>${esc(humanizeMachineText(summary, trace.trace_id))}</span></div><time>${esc(formatDate(lastEvent.timestamp).slice(11))}<em>${esc(status)}</em></time><u>${stage.events.length} 个事件</u></summary><div class="trace-stage-events">${stage.events.map(event => {
+      const item = traceEventPresentation(event, trace, group);
+      const sequence = event.details?.audit_source === "audit_store" ? `Audit #${event.details.audit_seq}` : `#${event.seq}`;
+      return `<article class="trace-event"><header><span>${esc(sequence)} · ${esc(item.actor)}</span><time>${esc(formatDate(event.timestamp).slice(11))}</time></header><b>${esc(item.title)}</b><p>${esc(item.summary)}</p>${rawDetails(event.details?.audit_source === "audit_store" ? "查看关联审计记录" : "查看原始事件", event.audit_record || event)}</article>`;
+    }).join("")}</div></details>`;
+  }).join("");
 }
 
 async function resolveApproval(approvalId, approve) {
@@ -1223,7 +1402,7 @@ async function resolveApproval(approvalId, approve) {
     const result = await api("/api/approvals/resolve", {method: "POST", body: JSON.stringify({approval_id: approvalId, approve, actor: "dashboard-user"})});
     toast(approve ? "审批已提交；正在读取执行结果" : "操作已拒绝；工具不会执行");
     await refresh({quiet: true});
-    if (result.trace_id) await loadTrace(result.trace_id, {quiet: true, render: true});
+    if (result.trace_id) await loadTrace(result.trace_id, {quiet: true, render: true, lockSelection: true});
   } catch (error) {
     buttons.forEach(button => { button.disabled = false; });
     toast(`审批失败：${error.message}`);
@@ -1233,20 +1412,45 @@ async function resolveApproval(approvalId, approve) {
 function groupAuditEvents(events = state.auditEvents) {
   const grouped = new Map();
   events.forEach(event => {
-    const callId = first(event.call_id, event.tool_call_id, event.result_evidence?.call_id, event.args?._opencode?.call_id);
-    const key = `${event.trace_id || "no-trace"}::${callId || `legacy-${event.seq}`}`;
+    const callId = auditCallId(event);
+    const key = callId ? `${event.trace_id || "no-trace"}::${callId}` : `legacy::${auditLegacySignature(event)}`;
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(event);
   });
   return [...grouped.entries()].map(([key, records]) => {
     const ordered = [...records].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
-    const decisionEvent = [...ordered].reverse().find(event => event.event_type !== "external_execution_result") || ordered[0];
+    const decisionEvents = ordered.filter(event => event.event_type !== "external_execution_result");
+    const initialDecisionEvent = decisionEvents[0] || ordered[0];
+    const decisionEvent = decisionEvents.at(-1) || ordered[0];
     const resultEvent = [...ordered].reverse().find(event => event.event_type === "external_execution_result") || null;
-    return {key, events: ordered, decisionEvent, resultEvent, representative: decisionEvent || resultEvent};
+    return {key, callId: first(auditCallId(decisionEvent), auditCallId(resultEvent)), events: ordered, initialDecisionEvent, decisionEvent, resultEvent, representative: decisionEvent || resultEvent};
   }).sort((a, b) => Math.max(...b.events.map(item => Number(item.seq || 0))) - Math.max(...a.events.map(item => Number(item.seq || 0))));
 }
 
+function auditGroupLifecycle(group) {
+  const initial = decisionClass(group?.initialDecisionEvent?.decision);
+  const final = decisionClass(group?.decisionEvent?.decision);
+  const reasons = reasonCodes(group?.decisionEvent?.reasons);
+  if (initial === "ask" && final === "deny" && reasons.includes("user_rejected")) {
+    return {decision: "ask", label: "ASK → 用户拒绝", execution: "未执行"};
+  }
+  if (initial === "ask" && (final === "allow" || group?.resultEvent)) {
+    const delegated = /delegated|等待外部|外部执行结果未回报/i.test(String(group?.decisionEvent?.result_summary || ""));
+    const execution = group?.resultEvent
+      ? (group.resultEvent.execution_status === "error" ? "执行失败" : "已执行")
+      : delegated ? "已批准，等待外部结果" : "已执行";
+    return {decision: "ask", label: "ASK → 用户批准", execution};
+  }
+  return {decision: final, label: decisionLabel(final), execution: ""};
+}
+
+function traceAgentId(traceId) {
+  return state.traces.find(trace => trace.trace_id === traceId)?.agent_id || "";
+}
+
 function auditGroupExecutionLabel(group) {
+  const lifecycle = auditGroupLifecycle(group);
+  if (lifecycle.execution) return lifecycle.execution;
   const event = group.decisionEvent || group.representative;
   if (group.resultEvent) return group.resultEvent.execution_status === "error" ? "执行失败" : "已执行";
   const decision = decisionClass(event?.decision);
@@ -1266,10 +1470,12 @@ function renderAuditList() {
   const node = $("#audit-list");
   const term = ($("#audit-search")?.value || "").trim().toLowerCase();
   const decision = $("#decision-filter")?.value || "";
-  const groups = groupAuditEvents().filter(group => {
+  const allGroups = groupAuditEvents();
+  const groups = allGroups.filter(group => {
     const event = group.decisionEvent || group.representative;
+    const lifecycle = auditGroupLifecycle(group);
     const haystack = group.events.map(item => `${item.task} ${item.tool} ${item.trace_id} ${item.call_id || ""} ${(item.reasons || []).join(" ")} ${JSON.stringify(item.args || {})}`).join(" ").toLowerCase();
-    return (!term || haystack.includes(term)) && (!decision || event?.decision === decision);
+    return (!term || haystack.includes(term)) && (!decision || lifecycle.decision === decision);
   });
   if (state.resourceErrors.audit) {
     node.className = "audit-list empty-state";
@@ -1284,10 +1490,23 @@ function renderAuditList() {
   node.className = "audit-list";
   node.innerHTML = groups.map(group => {
     const event = group.decisionEvent || group.representative;
+    const lifecycle = auditGroupLifecycle(group);
     const resultText = auditGroupExecutionLabel(group);
     const active = group.events.some(item => Number(item.seq) === Number(state.selectedAuditSeq));
-    return `<button class="audit-row ${active ? "active" : ""}" type="button" data-audit-seq="${event.seq}"><span class="${decisionClass(event.decision)}">${esc(decisionLabel(event.decision))}</span><div><b>${esc(event.tool)} · ${esc(truncate(displayTask(event.task), 56))}</b><small>${esc((event.reasons || []).slice(0, 2).map(reasonText).join(" · ") || "未记录阻断证据")} · ${esc(resultText)}</small><code>Trace ${esc(shortTrace(event.trace_id))} · ${group.events.length} 条关联记录 · Hash ${esc(shortHash(group.events.at(-1)?.hash))}</code></div><time>${esc(formatDate(group.events.at(-1)?.timestamp).slice(5, 16))}</time></button>`;
+    const sameTrace = allGroups.filter(item => item.representative?.trace_id === event.trace_id).sort((a, b) => Number(a.events.at(-1)?.seq || 0) - Number(b.events.at(-1)?.seq || 0));
+    const ordinal = sameTrace.findIndex(item => item.key === group.key) + 1;
+    const semantics = semanticFor(event.tool, event.args || {});
+    const identity = runtimeIdentity(traceAgentId(event.trace_id));
+    return `<button class="audit-row ${active ? "active" : ""}" type="button" data-audit-seq="${event.seq}"><span class="${lifecycle.decision}">${esc(lifecycle.label)}</span><div><b>调用 ${ordinal || 1} · ${esc(event.tool)} · ${esc(truncate(semantics.object, 42))}</b><small>${esc(resultText)} · ${esc(displayTaskSummary(event.task, 54))}</small><code>${esc(identity.entry)} · Trace ${esc(shortTrace(event.trace_id))} · ${group.events.length} 条关联记录</code></div><time>${esc(formatDate(group.events.at(-1)?.timestamp).slice(5, 16))}</time></button>`;
   }).join("");
+  requestAnimationFrame(() => {
+    const active = node.querySelector(".audit-row.active");
+    if (!active) return;
+    const top = active.offsetTop - node.offsetTop;
+    if (top < node.scrollTop || top + active.offsetHeight > node.scrollTop + node.clientHeight) {
+      node.scrollTop = Math.max(0, top - 8);
+    }
+  });
 }
 
 async function selectAuditEvent(seq, focus = true) {
@@ -1303,12 +1522,14 @@ async function selectAuditEvent(seq, focus = true) {
     trace = null;
   }
   renderAuditDetail(event, trace, auditGroup.events);
-  if (focus) $("#audit-detail-panel").focus({preventScroll: false});
+  if (focus) $("#audit-detail-panel").focus({preventScroll: true});
 }
 
 function groupForAudit(trace, auditEvent) {
   const groups = callGroups(trace);
-  return groups.find(group => group.events.some(item => item.phase === "audit_record" && Number(item.details?.audit_seq) === Number(auditEvent.seq)))
+  const callId = auditCallId(auditEvent);
+  return groups.find(group => callId && group.callId === callId)
+    || groups.find(group => group.events.some(item => item.phase === "audit_record" && Number(item.details?.audit_seq) === Number(auditEvent.seq)))
     || groups.filter(group => group.tool === auditEvent.tool).at(-1)
     || null;
 }
@@ -1316,6 +1537,9 @@ function groupForAudit(trace, auditEvent) {
 function renderAuditDetail(event, trace, auditRecords = [event]) {
   const panel = $("#audit-detail-panel");
   const group = groupForAudit(trace, event);
+  const recordGroup = groupAuditEvents(auditRecords)[0] || null;
+  const lifecycle = recordGroup ? auditGroupLifecycle(recordGroup) : {decision: decisionClass(event.decision), label: decisionLabel(event.decision)};
+  const decisionView = group ? callDecisionPresentation(group) : {decision: lifecycle.decision, label: lifecycle.label, status: lifecycle.label, source: "历史裁决记录"};
   const execution = executionState(group, event);
   const source = group ? sourceFrom(group, trace) : event.source || "未记录来源";
   const ct = group?.ct?.details || event.ct_trm || {};
@@ -1324,8 +1548,7 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
   const legacyFusedReasons = group ? [] : reasonCodes(event.reasons);
   const dlp = group?.dlp?.details || {};
   const outputDlp = group?.outputDlp?.details || {};
-  const approvalEvents = (trace?.events || []).filter(item => ["agent_pause", "approval_decision", "agent_resume"].includes(item.phase)
-    && (!group || item.details?.call_id === group.callId));
+  const approvalEvents = (group?.events || trace?.events || []).filter(item => ["agent_pause", "approval_decision", "agent_resume"].includes(item.phase));
   const integrityText = state.chainVerification?.valid === true
     ? `全局链已校验 ${state.chainVerification.events} 条记录，当前结论通过。`
     : state.chainVerification?.valid === false
@@ -1336,7 +1559,7 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
     ...patterns.slice(0, 2).map(item => `${item.pattern_id || "模式"} ${item.name || item.explanation}`),
     ...legacyFusedReasons.slice(0, 3).map(reasonText),
   ].filter(Boolean).join("；") || "没有记录到阻断风险证据";
-  const traceEvents = (trace?.events || []).filter(item => !group || !item.details?.call_id || item.details.call_id === group.callId);
+  const traceEvents = group ? traceEventsForCall(trace, group) : (trace?.events || []);
   const normalizedArgs = group?.policy?.details?.normalized_arguments || event.args || {};
   const presentationArgs = presentationArgsForGroup(group, normalizedArgs);
   const rawPlanArgs = group?.plan?.details?.raw_arguments || group?.plan?.details?.arguments || event.args || {};
@@ -1344,29 +1567,29 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
   const semantics = semanticFor(event.tool, presentationArgs, group);
   const argumentInfo = argumentSummary(event.tool, presentationArgs);
   const resultRecord = [...auditRecords].reverse().find(item => item.event_type === "external_execution_result") || null;
-  const approvalSummary = approvalEvents.length ? approvalEvents.map(item => item.phase === "approval_decision" ? (item.details?.approved ? "用户批准" : "用户拒绝") : item.title).filter(Boolean).join(" → ") : (decisionClass(event.decision) === "ask" ? "等待审批" : "本次调用无需审批");
+  const approvalSummary = approvalEvents.length ? approvalEvents.map(item => item.phase === "approval_decision" ? (item.details?.approved ? "用户批准" : "用户拒绝") : item.title).filter(Boolean).join(" → ") : (lifecycle.label.includes("用户拒绝") ? "用户拒绝" : lifecycle.decision === "ask" ? "等待审批" : "本次调用无需审批");
   const dlpInputText = group?.dlp ? (Number(dlp.finding_count || 0) ? `输入检测到 ${Number(dlp.finding_count)} 项敏感特征` : "输入未检测到敏感明文") : "未记录独立输入 DLP 事件";
   const dlpOutputText = group?.outputDlp ? (Number(outputDlp.finding_count || 0) ? `输出检测到 ${Number(outputDlp.finding_count)} 项敏感特征` : "输出未检测到敏感明文") : (execution.key === "blocked" || execution.key === "rejected" ? "工具未执行，无输出可扫描" : "未记录独立输出 DLP 事件");
   const policyText = group
     ? (policyRules.length ? policyRules.map(reasonText).join("、") : "未命中基础阻断规则")
     : "历史审计未保留独立 Policy 证据归属";
-  const decisionSource = group?.approval?.details?.approved === false
-    ? "审批结论（原 Decision Fusion：Ask）"
-    : (group?.fusion ? "Decision Fusion" : "历史裁决记录（未记录独立 Decision Fusion）");
   const currentAudit = auditRecords.at(-1) || event;
   const auditFlow = auditRecords.map(item => `事件 #${item.seq}（${item.event_type === "external_execution_result" ? "执行结果" : "裁决"}）`).join(" → ");
-  panel.innerHTML = `<div class="audit-detail-head"><div><span class="section-kicker">一次工具调用 · ${auditRecords.length} 条关联审计记录</span><h2>${esc(event.tool)} · ${esc(displayTask(event.task))}</h2>${identifierRef("Trace", event.trace_id)}</div><span class="decision-badge ${decisionClass(event.decision)}">${esc(decisionLabel(event.decision))}</span></div>
+  const identity = runtimeIdentity(first(trace?.agent_id, traceAgentId(event.trace_id)));
+  const chainStatus = state.chainVerification?.valid === true ? "校验通过" : state.chainVerification?.valid === false ? "校验失败" : "已写入，待校验";
+  const chainCount = state.chainVerification?.events ?? "—";
+  panel.innerHTML = `<div class="audit-detail-head"><div><span class="section-kicker">${esc(runtimeIdentityLabel(first(trace?.agent_id, traceAgentId(event.trace_id))))}</span><h2>${esc(event.tool)} · ${esc(displayTaskSummary(event.task, 140))}</h2>${identifierRef("Trace", event.trace_id)}</div><span class="decision-badge ${decisionView.decision}">${esc(decisionView.status)}</span></div>
     <div class="question-grid">
       <div class="question-card"><small>危险从哪里来？</small><b>${esc(sourcePresentation(source))}</b><span>${event.tainted ? "该来源被标记为低可信并进入参数传播分析。" : "未标记为污染来源。"}</span></div>
       <div class="question-card"><small>为什么危险？</small><b>${esc(truncate(humanizeMachineText(dangerWhy, event.trace_id), 92))}</b><span>依据真实 Policy / CT-TRM / DLP 事件。</span></div>
       <div class="question-card"><small>最终有没有执行？</small><b>${esc(execution.title)}</b><span>${esc(humanizeMachineText(execution.detail, event.trace_id))}</span></div>
     </div>
-    <section class="detail-section"><h3>任务目标与待执行动作</h3><dl class="detail-facts"><div><dt>任务目标</dt><dd>${esc(displayTask(event.task))}</dd></div>${argumentInfo.rows.map(row => `<div><dt>${esc(row.label)}</dt><dd>${esc(row.value)}</dd></div>`).join("")}</dl></section>
+    <section class="detail-section"><h3>任务目标与待执行动作</h3><dl class="detail-facts"><div><dt>任务目标</dt><dd>${esc(displayTaskSummary(event.task, 260))}</dd></div><div><dt>运行入口</dt><dd>${esc(identity.entry)}</dd></div>${identity.adapter ? `<div><dt>适配器</dt><dd>${esc(identity.adapter)}</dd></div>` : ""}${argumentInfo.rows.map(row => `<div><dt>${esc(row.label)}</dt><dd>${esc(row.value)}</dd></div>`).join("")}</dl>${rawDetails("查看完整任务", {task: event.task, trace_id: event.trace_id, agent_id: first(trace?.agent_id, traceAgentId(event.trace_id))})}</section>
     <section class="detail-section"><h3>参数安全语义</h3><dl class="detail-facts three"><div><dt>访问对象</dt><dd>${esc(semantics.object)}</dd></div><div><dt>操作行为</dt><dd>${esc(semantics.action)}</dd></div><div><dt>可能影响</dt><dd>${esc(semantics.effect)}</dd></div></dl></section>
     <section class="detail-section"><h3>来源与污染路径</h3><p class="readable-evidence"><b>${esc(sourcePresentation(source))}</b><span>${event.tainted ? `低可信来源 → ${esc((ct.taint_matches || [])[0]?.argument || "工具参数")} → ${esc(event.tool)}` : "未检测到参数污染传播"}</span></p></section>
     <section class="detail-section"><h3>风险证据</h3><div class="audit-evidence-grid"><div><b>Policy Engine</b><span>${esc(policyText)}</span></div><div><b>CT-TRM</b><span>风险分 ${esc(Number(ct.total_score || 0))}${patterns.length ? ` · ${esc(patterns.slice(0, 2).map(item => item.name || item.explanation).join("、"))}` : ""}</span></div><div><b>DLP</b><span>${esc(dlpInputText)}；${esc(dlpOutputText)}</span></div></div></section>
-    <section class="detail-section"><h3>裁决、审批与执行</h3><dl class="detail-facts three"><div><dt>${esc(decisionSource)}</dt><dd>${esc(decisionLabel(event.decision))} · ${esc(decisionReason(group || {decision: event.decision}))}</dd></div><div><dt>审批过程</dt><dd>${esc(approvalSummary)}</dd></div><div><dt>执行状态</dt><dd>${esc(execution.title)}</dd></div></dl></section>
-    <section class="detail-section"><h3>审计完整性</h3><p class="audit-record-flow">本次调用关联：${esc(auditFlow)}</p><div class="hash-link"><div><small>当前记录的前序 Hash</small>${identifierRef("Hash", currentAudit.prev_hash)}</div><i>→</i><div><small>当前记录 Hash</small>${identifierRef("Hash", currentAudit.hash)}</div></div><p>${esc(integrityText)} 任一关键记录被改动，后续记录将无法通过校验。</p></section>
+    <section class="detail-section"><h3>裁决、审批与执行</h3><dl class="detail-facts three"><div><dt>${esc(decisionView.source)}</dt><dd>${esc(decisionView.label)} · ${esc(group ? fusionDecisionReason(group) : decisionReason({decision: event.decision}))}</dd></div><div><dt>审批过程</dt><dd>${esc(approvalSummary)}</dd></div><div><dt>执行状态</dt><dd>${esc(execution.title)}</dd></div></dl></section>
+    <section class="detail-section"><h3>审计完整性</h3><dl class="detail-facts audit-integrity-facts"><div><dt>审计完整性</dt><dd>${esc(chainStatus)}</dd></div><div><dt>当前事件</dt><dd>#${esc(currentAudit.seq)}</dd></div><div><dt>全局审计链</dt><dd>${esc(chainCount)} 条记录${state.chainVerification?.valid === true ? "完整" : ""}</dd></div><div><dt>Transparency Trace</dt><dd>${esc(traceEvents.length)} 个关联事件</dd></div></dl><details class="raw-details integrity-details"><summary><span>查看完整证据链</span><em>展开</em></summary><div class="integrity-details-body"><p class="audit-record-flow">本次调用关联：${esc(auditFlow)}</p><div class="hash-link"><div><small>当前记录的前序 Hash</small>${identifierRef("Hash", currentAudit.prev_hash)}</div><i>→</i><div><small>当前记录 Hash</small>${identifierRef("Hash", currentAudit.hash)}</div></div><p>${esc(integrityText)} 任一关键记录被改动，后续记录将无法通过校验。</p></div></details></section>
     <section class="detail-section"><h3>关联 Transparency Trace</h3>${traceEvents.length ? `<div class="mini-trace">${traceEvents.map(item => { const readable = traceEventPresentation(item, trace, group); return `<div><span>#${esc(item.seq)}</span><b>${esc(readable.title)}</b><code>${esc(readable.summary)}</code></div>`; }).join("")}</div>` : `<div class="empty-state">该历史记录没有可读取的 Transparency Trace；审计记录仍然保留。</div>`}</section>
     <section class="raw-evidence-stack">${rawDetails("查看原始 ToolCall", {raw_tool: rawPlanTool, raw_arguments: rawPlanArgs, normalized_tool: event.tool, normalized_arguments: normalizedArgs})}${rawDetails("查看完整风险证据", {source, tainted: event.tainted, policy_rules: policyRules, legacy_fused_reasons: legacyFusedReasons, ct_trm: ct, dlp_input: dlp, dlp_output: outputDlp})}${rawDetails("查看完整执行结果", {execution, trace_result: group?.result?.details || null, audit_result: resultRecord})}${rawDetails("查看原始审计事件", auditRecords)}</section>`;
 }
@@ -1448,6 +1671,16 @@ function policyTrigger(policy) {
   return "满足该规则定义的匹配对象与处置条件";
 }
 
+function policyEvidenceType(policy) {
+  const text = `${policy?.name || ""} ${policy?.scope || ""} ${policy?.detail || ""}`.toLowerCase();
+  if (/credential|secret|sensitive|\.ssh|敏感|凭据/.test(text)) return "敏感资源证据";
+  if (/outside|external|workspace|escape|traversal|边界|越界/.test(text)) return "资源边界证据";
+  if (/command|shell|run_command/.test(text)) return "命令行为证据";
+  if (/network|http|ssrf|email|网络|外发|邮件/.test(text)) return "数据流向证据";
+  if (/write|delete|move|modify|写入|删除|移动|变更/.test(text)) return "副作用证据";
+  return "策略匹配证据";
+}
+
 function renderPolicies() {
   const list = $("#policy-list");
   setText("#policy-count", state.resourceErrors.policies ? "不可用" : `${state.policies.length} 条规则`);
@@ -1460,9 +1693,7 @@ function renderPolicies() {
   } else {
     list.className = "policy-list";
     list.innerHTML = state.policies.map(policy => {
-      const action = String(policy.action || "").toLowerCase();
-      const cls = action.includes("/") ? "mixed" : decisionClass(action);
-      return `<div class="policy-row"><b>${esc(policy.name)}</b><span>${esc(policyBoundaries(policy))}</span><em class="${cls}">${esc(policy.action)}</em><code>${esc(policyTrigger(policy))}</code>${rawDetails("查看完整匹配值", policy)}</div>`;
+      return `<details class="policy-row"><summary><b>${esc(policy.name)}</b><span>${esc(policyBoundaries(policy))}</span><em>${esc(policyEvidenceType(policy))}</em><code>${esc(policyTrigger(policy))}</code><i>展开</i></summary><div class="policy-definition"><dl><div><dt>策略定义动作</dt><dd>${esc(policy.action || "未记录")}</dd></div><div><dt>完整适用范围</dt><dd>${esc(policy.scope || "未记录")}</dd></div><div><dt>完整匹配值</dt><dd><code>${esc(policy.detail || "未记录")}</code></dd></div></dl><pre>${esc(safeJson(policy))}</pre></div></details>`;
     }).join("");
   }
   const tools = $("#tool-catalog");
@@ -1474,7 +1705,8 @@ function renderPolicies() {
     tools.textContent = "后端未返回工具定义";
   } else {
     tools.className = "tool-catalog";
-    tools.innerHTML = state.tools.map(tool => `<div class="tool-item"><b>${esc(tool.name)}</b><span>${esc(tool.description)}</span><code>参数：${esc(Object.keys(tool.parameters?.properties || {}).join("、") || "无")}</code></div>`).join("");
+    const representative = state.tools.slice(0, 6).map(tool => tool.name).join("、");
+    tools.innerHTML = `<details class="tool-catalog-disclosure"><summary><div><b>受控工具｜${state.tools.length} 类</b><span>${esc(representative)}${state.tools.length > 6 ? " 等" : ""}</span></div><em>查看全部</em></summary><div class="tool-catalog-list">${state.tools.map(tool => `<div class="tool-item"><b>${esc(tool.name)}</b><span>${esc(tool.description)}</span><code>参数：${esc(Object.keys(tool.parameters?.properties || {}).join("、") || "无")}</code></div>`).join("")}</div></details>`;
   }
 }
 
@@ -1598,8 +1830,16 @@ async function runAgent() {
     state.contextId = result.conversation?.conversation_id || state.contextId;
     if (state.contextId) localStorage.setItem("agentContextId", state.contextId);
     resultNode.textContent = result.status === "awaiting_approval" ? "任务已暂停等待审批；上方工作台已载入证据。" : "任务已完成；上方工作台已载入真实 Trace。";
-    await refresh({quiet: true});
-    if (result.trace_id) await loadTrace(result.trace_id, {quiet: true, render: true});
+    if (result.trace_id) {
+      state.primaryTraceId = result.trace_id;
+      state.traceSelectionLocked = true;
+    }
+    await refresh({quiet: true, preserveTrace: false});
+    if (result.trace_id) {
+      await loadTrace(result.trace_id, {quiet: true, render: true, clearFilter: true});
+      state.latestTrace = state.selectedTrace;
+      renderOverview();
+    }
     $("#settings-drawer").open = false;
   } catch (error) {
     resultNode.textContent = `任务运行失败：${error.message}`;
@@ -1622,8 +1862,7 @@ const LIVE_SYNC_INTERVAL_MS = 3000;
 let liveSyncTimer = null;
 const deferredLiveViews = new Set();
 const liveScrollSelectors = [
-  "#call-timeline", "#trace-history", ".evidence-column", ".decision-column",
-  "#trace-events", "#audit-list", "#audit-detail-panel", ".tool-catalog", ".trusted-workspace-list",
+  "#call-timeline", "#trace-history", "#audit-list", ".trusted-workspace-list",
 ];
 
 function activeViewId() {
@@ -1724,11 +1963,21 @@ async function syncLiveData() {
       && state.chainVerification?.head !== previousAuditHead;
     if (viewId === "audit" || auditChanged || state.resourceErrors.audit) {
       await loadResource("audit", "/api/audit?limit=100", result => { state.auditEvents = result.events || []; });
+      if (auditChanged && state.selectedTrace) syncAuditSelectionToCall(state.selectedTrace, state.selectedCallId);
     }
 
     const tracesAvailable = !state.resourceErrors.traces;
-    const latestSummary = tracesAvailable ? state.traces[0] : null;
+    const traceListChanged = traceListVersion() !== previousTraceListVersion;
+    let automaticPrimary = null;
+    if (tracesAvailable && !state.traceSelectionLocked && (traceListChanged || !state.primaryTraceId || !state.traces.some(trace => trace.trace_id === state.primaryTraceId))) {
+      automaticPrimary = await choosePrimaryTrace(state.traces);
+      if (automaticPrimary?.trace_id) state.primaryTraceId = automaticPrimary.trace_id;
+    }
+    const latestSummary = tracesAvailable
+      ? (state.traces.find(trace => trace.trace_id === state.primaryTraceId) || state.traces[0])
+      : null;
     const latestTraceId = latestSummary?.trace_id || null;
+    if (latestTraceId) state.primaryTraceId = latestTraceId;
     const latestChanged = Boolean(latestTraceId) && (
       previousLatestId !== latestTraceId
       || !state.latestTrace
@@ -1750,34 +1999,37 @@ async function syncLiveData() {
       state.latestTrace = null;
       delete state.resourceErrors.traceDetail;
     } else {
-      let latestDetail = null;
-      if (latestChanged) latestDetail = await loadLiveTrace(latestTraceId, "traceDetail");
-      if (latestChanged) state.latestTrace = latestDetail;
+      let latestDetail = automaticPrimary;
+      if (latestChanged && !latestDetail) latestDetail = await loadLiveTrace(latestTraceId, "traceDetail");
+      if (latestDetail) state.latestTrace = latestDetail;
 
-      if (!selectedTraceId && latestDetail) {
+      if ((!state.traceSelectionLocked || !selectedTraceId) && latestDetail) {
         delete state.resourceErrors.selectedTraceDetail;
         state.selectedTrace = latestDetail;
-        state.selectedCallId = latestCall(latestDetail)?.callId || null;
+        state.selectedCallId = preferredCall(latestDetail)?.callId || null;
+        syncAuditSelectionToCall(latestDetail, state.selectedCallId);
       } else if (selectedTraceId === latestTraceId && latestDetail) {
         delete state.resourceErrors.selectedTraceDetail;
         state.selectedTrace = latestDetail;
         const groups = callGroups(latestDetail);
         if (!groups.some(group => group.callId === state.selectedCallId)) {
-          state.selectedCallId = groups.at(-1)?.callId || null;
+          state.selectedCallId = preferredCall(latestDetail)?.callId || null;
         }
+        syncAuditSelectionToCall(latestDetail, state.selectedCallId);
       } else if (selectedChanged) {
         const selectedDetail = await loadLiveTrace(selectedTraceId, "selectedTraceDetail");
         if (selectedDetail) {
           state.selectedTrace = selectedDetail;
           const groups = callGroups(selectedDetail);
           if (!groups.some(group => group.callId === state.selectedCallId)) {
-            state.selectedCallId = groups.at(-1)?.callId || null;
+            state.selectedCallId = preferredCall(selectedDetail)?.callId || null;
           }
+          syncAuditSelectionToCall(selectedDetail, state.selectedCallId);
         }
       }
     }
 
-    const tracesChanged = traceListVersion() !== previousTraceListVersion;
+    const tracesChanged = traceListChanged;
     const approvalsChanged = approvalListVersion() !== previousApprovalListVersion;
     const overviewChanged = JSON.stringify(state.overview || null) !== previousOverviewVersion;
     const healthChanged = JSON.stringify(state.health || null) !== previousHealthVersion;
@@ -1787,9 +2039,9 @@ async function syncLiveData() {
     const selectedCallChanged = previousSelectedCallId !== state.selectedCallId;
 
     let historyNeedsRender = tracesChanged || errorsChanged;
-    let workbenchNeedsRender = selectedChanged || selectedInitialized || selectedCallChanged || approvalsChanged || chainStateChanged || healthChanged || errorsChanged;
+    let workbenchNeedsRender = selectedChanged || selectedInitialized || selectedCallChanged || approvalsChanged || auditChanged || chainStateChanged || healthChanged || errorsChanged || (!state.traceSelectionLocked && latestChanged);
     let overviewNeedsRender = overviewChanged || latestChanged || auditChanged || healthChanged || errorsChanged;
-    let auditNeedsRender = auditChanged || errorsChanged || (!state.selectedAuditSeq && state.auditEvents.length > 0);
+    let auditNeedsRender = auditChanged || chainStateChanged || errorsChanged || (!state.selectedAuditSeq && state.auditEvents.length > 0);
     const activeNeedsRender = viewId === "agent"
       ? historyNeedsRender || workbenchNeedsRender
       : viewId === "dashboard"
@@ -1817,6 +2069,7 @@ async function syncLiveData() {
     if (viewId === "audit" && (auditChanged || chainStateChanged || flushDeferred) && !interactionLocked) renderCurrentAuditVerification();
     if (viewId === "audit" && auditNeedsRender && !interactionLocked) {
       renderAuditList();
+      if (!state.selectedAuditSeq && state.selectedTrace) syncAuditSelectionToCall(state.selectedTrace, state.selectedCallId);
       if (!state.selectedAuditSeq && state.auditEvents.length) {
         await selectAuditEvent(state.auditEvents[0].seq, false);
       } else if (state.selectedAuditSeq && state.auditEvents.some(event => event.seq === state.selectedAuditSeq)) {
@@ -1865,12 +2118,15 @@ document.addEventListener("click", event => {
   if (nav) switchView(nav.dataset.view);
   const jump = event.target.closest("[data-jump]");
   if (jump) switchView(jump.dataset.jump);
-  const scenario = event.target.closest("[data-scenario]");
-  if (scenario) runScenario(scenario.dataset.scenario, scenario);
   const trace = event.target.closest("[data-trace-id]");
-  if (trace) loadTrace(trace.dataset.traceId);
+  if (trace) loadTrace(trace.dataset.traceId, {lockSelection: true});
   const call = event.target.closest("[data-call-id]");
-  if (call) { state.selectedCallId = call.dataset.callId; renderWorkbench(); }
+  if (call) {
+    state.traceSelectionLocked = true;
+    state.selectedCallId = call.dataset.callId;
+    syncAuditSelectionToCall(state.selectedTrace, state.selectedCallId);
+    renderWorkbench();
+  }
   const audit = event.target.closest("[data-audit-seq]");
   if (audit) { switchView("audit"); selectAuditEvent(audit.dataset.auditSeq); }
   const approval = event.target.closest("[data-approval-id]");
