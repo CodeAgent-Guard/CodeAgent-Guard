@@ -752,6 +752,16 @@ sudo lsof -i :8000
 WSL 共享项目 `data/` 时，另一侧实例可能无法出现在当前 WSL 的 `lsof` 输出中，
 但 Guard 会用跨环境实例锁阻止两边同时写 SQLite。
 
+第二次运行 `./start.sh` 不会接管已有实例的标准输出。需要查看该实例的实时请求
+日志时运行：
+
+```bash
+./start.sh --logs
+```
+
+日志同时保存在当前数据目录的 `server.log`；浏览器刷新时主动取消的在途请求不会
+再被误报为 Trace 数据错误。
+
 ### OpenCode 已运行，但前端没有出现记录
 
 1. 在项目根目录运行 `opencode debug config`，确认只加载当前项目的

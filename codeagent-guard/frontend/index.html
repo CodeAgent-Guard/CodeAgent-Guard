@@ -45,7 +45,7 @@
             <div><small>网关状态</small><strong id="runtime-status">正在连接</strong></div>
           </div>
           <div><small>当前工作区</small><code id="runtime-workspace">读取中</code></div>
-          <div><small>最近 Trace</small><code id="runtime-trace">暂无记录</code></div>
+          <div><small>当前分析 Trace</small><code id="runtime-trace">暂无记录</code></div>
           <div><small>数据范围</small><strong>全部审计库</strong><em>实时汇总</em></div>
           <button class="primary" type="button" data-jump="agent">查看调用分析</button>
         </section>
@@ -53,10 +53,10 @@
         <div class="overview-grid">
           <section class="panel current-call-panel">
             <div class="section-head">
-              <div><span class="section-kicker">最近一次真实记录</span><h2>ToolCall 与最终状态</h2></div>
+              <div><span class="section-kicker" id="overview-call-kicker">当前分析调用</span><h2>ToolCall 与最终状态</h2></div>
               <span class="decision-badge pending" id="overview-decision">读取中</span>
             </div>
-            <div id="overview-current" class="current-call empty-state">正在读取最近一次 Transparency Trace…</div>
+            <div id="overview-current" class="current-call empty-state">正在读取当前分析 Transparency Trace…</div>
           </section>
 
           <section class="panel overview-facts-panel">

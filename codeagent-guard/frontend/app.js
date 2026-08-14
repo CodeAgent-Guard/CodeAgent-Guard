@@ -262,16 +262,17 @@ function rawDetails(label, value, {copyValue = "", className = ""} = {}) {
   return `<details class="raw-details ${esc(className)}"><summary><span>${esc(label)}</span><em>展开</em></summary><div class="raw-details-body">${copyValue ? `<button class="copy-button raw-copy" type="button" data-copy-value="${esc(copyValue)}">复制完整值</button>` : ""}<pre>${esc(safeJson(value))}</pre></div></details>`;
 }
 
-function runtimeIdentity(agentId) {
+function runtimeIdentity(agentId, metadata = {}) {
   const value = String(agentId || "").toLowerCase();
+  const integration = String(first(metadata?.integration, metadata?.adapter, "")).toLowerCase();
   if (value === "builtin-agent" || value.startsWith("builtin-")) return {kind: "builtin", entry: "自研 Agent", adapter: ""};
-  if (value.includes("opencode")) return {kind: "opencode", entry: "OpenCode", adapter: "OpenCode Adapter"};
+  if (value.includes("opencode") || integration === "opencode") return {kind: "opencode", entry: "OpenCode", adapter: "OpenCode Adapter"};
   if (["defense-demo-agent", "demo-agent"].includes(value) || value.includes("demo")) return {kind: "test", entry: "网关测试调用", adapter: ""};
   return {kind: agentId ? "external" : "unknown", entry: agentId ? "外部 Agent" : "未记录", adapter: ""};
 }
 
-function runtimeIdentityLabel(agentId, {includeAdapter = true} = {}) {
-  const identity = runtimeIdentity(agentId);
+function runtimeIdentityLabel(agentId, {includeAdapter = true, metadata = {}} = {}) {
+  const identity = runtimeIdentity(agentId, metadata);
   return `运行入口｜${identity.entry}${includeAdapter && identity.adapter ? ` · 适配器｜${identity.adapter}` : ""}`;
 }
 
@@ -287,7 +288,7 @@ const REASON_LABELS = {
   tainted_instruction: "调用受到不可信指令影响",
   sensitive_file_access_via_shell: "Shell 绕过文件工具读取敏感资产",
   policy_bypass_attempt: "尝试绕过既有安全边界",
-  ct_trm_risk_score: "CT-TRM 风险分达到处置阈值",
+  ct_trm_risk_score: "CT-TRM 风险分达到风险处置阈值",
   user_confirmation_required: "需要用户明确确认",
   user_rejected: "用户拒绝操作",
   tool_execution_failed: "工具执行阶段失败",
@@ -304,6 +305,53 @@ const REASON_LABELS = {
   command_from_untrusted_context: "低可信内容触发危险命令",
 };
 const reasonText = reason => REASON_LABELS[reason] || String(reason || "").replaceAll("_", " ");
+
+function ctFeatureLabel(feature) {
+  const name = String(feature?.name || "");
+  const reason = String(feature?.reason || "").trim();
+  if (name === "AssetRisk" && /ssh|凭据|credential/i.test(reason)) return "SSH/凭据类敏感资源";
+  if (name === "AssetRisk") return reason || "目标资源敏感性";
+  if (name === "BoundaryRisk") return reason || "工作区边界风险";
+  if (name === "ActionRisk") return reason || "工具副作用风险";
+  if (name === "TaintRisk") return reason || "低可信内容传播";
+  if (name === "ChainRisk") return reason || "调用链组合风险";
+  if (name === "SourceRisk") return reason || "调用来源风险";
+  return reason || name || "已记录风险因素";
+}
+
+function ctEvidencePresentation(details = {}) {
+  const score = Number(details.total_score || 0);
+  const hardDeny = details.hard_deny === true;
+  const reachedThreshold = hardDeny || reasonCodes(details.reasons).includes("ct_trm_risk_score");
+  const patterns = (details.risk_patterns || []).filter(Boolean);
+  const positiveFeatures = (details.features || []).filter(item => Number(item?.score || 0) > 0);
+  const primaryFeatures = positiveFeatures.filter(item => ["AssetRisk", "BoundaryRisk", "ActionRisk", "TaintRisk", "ChainRisk"].includes(item?.name));
+  const features = primaryFeatures.length ? primaryFeatures : positiveFeatures.filter(item => item?.name === "SourceRisk");
+  const factors = patterns.length
+    ? patterns.map(item => item.name || item.explanation || item.pattern_id).filter(Boolean)
+    : features.map(ctFeatureLabel).filter(Boolean);
+  const uniqueFactors = [...new Set(factors)];
+  return {
+    score,
+    hardDeny,
+    reachedThreshold,
+    risk: riskLabel(details.risk_level),
+    scoreLine: `风险分 ${score} · ${hardDeny ? "达到不可降级风险阈值" : reachedThreshold ? "达到风险处置阈值" : "未达到风险处置阈值"}`,
+    factorLine: uniqueFactors.length ? `风险因素｜${uniqueFactors.slice(0, 2).join("、")}` : "未形成额外风险因素",
+  };
+}
+
+function dlpScanPresentation(details = {}, direction = "input") {
+  const count = Number(details.finding_count || 0);
+  const target = direction === "output" ? "输出" : "输入";
+  const detailTarget = direction === "output" ? "工具输出" : "输入参数";
+  return {
+    count,
+    status: count ? `${target}命中 ${count} 项` : `${target}未命中`,
+    line: count ? `${target}命中 ${count} 项敏感内容` : `${target}未命中`,
+    detail: count ? `${detailTarget}检测到 ${count} 项敏感特征，具体内容已脱敏` : `${detailTarget}未检测到敏感明文`,
+  };
+}
 
 async function api(path, options = {}) {
   let response;
@@ -590,7 +638,7 @@ function traceIsComplete(trace) {
 async function choosePrimaryTrace(summaries = state.traces) {
   const supported = summaries.filter(summary => {
     const count = Number(summary.event_count || 0);
-    const kind = runtimeIdentity(summary.agent_id).kind;
+    const kind = runtimeIdentity(summary.agent_id, summary.metadata).kind;
     return count > 0 && count <= 80 && ["builtin", "opencode"].includes(kind);
   }).slice(0, 12);
   const candidates = await Promise.all(supported.map(async summary => {
@@ -606,7 +654,7 @@ async function choosePrimaryTrace(summaries = state.traces) {
     const group = preferredCall(trace);
     return decisionClass(group?.fusionDecision) === "deny" && !group?.approval && group?.action?.details?.executed === false;
   };
-  const directDeny = complete.find(trace => runtimeIdentity(trace.agent_id).kind === "opencode" && isDirectDeny(trace))
+  const directDeny = complete.find(trace => runtimeIdentity(trace.agent_id, trace.metadata).kind === "opencode" && isDirectDeny(trace))
     || complete.find(isDirectDeny);
   if (directDeny) return directDeny;
   if (complete[0]) return complete[0];
@@ -997,6 +1045,7 @@ async function refresh({preserveTrace = true, quiet = false} = {}) {
   if (state.loading) return;
   if (liveSyncPromise) await liveSyncPromise;
   if (state.loading) return;
+  if (!quiet) $("#settings-drawer").open = false;
   state.loading = true;
   $("#refresh").disabled = true;
   const selectedTraceId = preserveTrace && state.traceSelectionLocked ? state.selectedTrace?.trace_id : null;
@@ -1133,6 +1182,7 @@ function renderOverviewCurrent(trace) {
   const node = $("#overview-current");
   const badge = $("#overview-decision");
   if (!trace) {
+    setText("#overview-call-kicker", "当前分析调用");
     node.className = "current-call empty-state";
     node.textContent = state.resourceErrors.traces || state.resourceErrors.traceDetail ? "Transparency Trace 读取失败" : "暂无 Trace 记录";
     badge.className = "decision-badge pending";
@@ -1143,10 +1193,12 @@ function renderOverviewCurrent(trace) {
   const group = latestCall(trace);
   if (!group) {
     node.className = "current-call empty-state";
-    node.textContent = "最近 Trace 中没有 ToolCall";
+    node.textContent = "当前分析 Trace 中没有 ToolCall";
     return;
   }
   const auditEvent = auditForGroup(group, trace.trace_id);
+  const chronologicalLatest = state.traces[0]?.trace_id === trace.trace_id;
+  setText("#overview-call-kicker", chronologicalLatest ? "最近一次真实记录" : "当前分析调用");
   const execution = executionState(group, auditEvent);
   const decisionView = callDecisionPresentation(group);
   const decision = decisionView.decision;
@@ -1159,7 +1211,7 @@ function renderOverviewCurrent(trace) {
   const verified = state.chainVerification?.valid === true;
   node.className = "current-call";
   node.innerHTML = `<div class="overview-call">
-    <div class="overview-task"><small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(taskSummary)}</b><span>${identifierRef("Trace", trace.trace_id)}</span>${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}</div>
+    <div class="overview-task"><small>${esc(runtimeIdentityLabel(trace.agent_id, {metadata: trace.metadata}))}</small><b>${esc(taskSummary)}</b><span>${identifierRef("Trace", trace.trace_id)}</span>${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}</div>
     <div class="overview-code overview-tool-summary">${summary.rows.map(row => `<div><small>${esc(row.label === "关键参数" ? "目标" : row.label)}</small>${argumentRowMarkup(row)}</div>`).join("")}</div>
     <div class="overview-outcome">
       <div><small>${esc(decisionView.source)}</small><b>${esc(decisionView.status)} · ${esc(riskLabel(group.risk))}</b><span>${esc(fusionDecisionReason(group))}</span></div>
@@ -1202,7 +1254,7 @@ function renderHistory() {
     : matches;
   const grouped = new Map();
   visible.forEach(trace => {
-    const identity = runtimeIdentity(trace.agent_id);
+    const identity = runtimeIdentity(trace.agent_id, trace.metadata);
     const key = `${identity.kind}::${displayTask(trace.task)}`;
     if (!grouped.has(key)) grouped.set(key, {trace, count: 0, selected: false});
     const entry = grouped.get(key);
@@ -1226,7 +1278,7 @@ function renderHistory() {
   node.className = "trace-history";
   node.innerHTML = traces.slice(0, 20).map(item => {
     const trace = item.trace;
-    const identity = runtimeIdentity(trace.agent_id);
+    const identity = runtimeIdentity(trace.agent_id, trace.metadata);
     const loadedTrace = [state.selectedTrace, state.latestTrace].find(value => value?.trace_id === trace.trace_id);
     const loadedGroup = loadedTrace ? preferredCall(loadedTrace) : null;
     const taskSummary = loadedGroup
@@ -1251,10 +1303,10 @@ function renderWorkbench() {
   state.selectedCallId = group.callId;
   $("#task-summary").className = "task-summary";
   const selectedTaskSummary = taskSummaryForCall(trace.task, group.tool, group.args || {}, group, 180);
-  $("#task-summary").innerHTML = `<small>${esc(runtimeIdentityLabel(trace.agent_id))}</small><b>${esc(selectedTaskSummary)}</b>${identifierRef("Trace", trace.trace_id)}${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}`;
+  $("#task-summary").innerHTML = `<small>${esc(runtimeIdentityLabel(trace.agent_id, {metadata: trace.metadata}))}</small><b>${esc(selectedTaskSummary)}</b>${identifierRef("Trace", trace.trace_id)}${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}`;
   $("#call-timeline").innerHTML = groups.map((item, index) => {
     const summary = argumentSummary(item.tool, item.policy?.details?.normalized_arguments || item.args || {});
-    return `<button type="button" class="call-item ${decisionClass(item.decision)} ${item.callId === group.callId ? "active" : ""}" data-call-id="${esc(item.callId)}"><i>${index + 1}</i><div><b>${esc(item.tool)}</b><small>${esc(truncate(summary.oneLine, 48))}</small></div><em>${esc(decisionLabel(item.decision))}</em></button>`;
+    return `<button type="button" class="call-item ${decisionClass(item.decision)} ${item.callId === group.callId ? "active" : ""}" data-call-id="${esc(item.callId)}"><i>ToolCall #${index + 1}</i><div><b>${esc(item.tool)}</b><small>${esc(truncate(summary.oneLine, 48))}</small></div><em>${esc(decisionLabel(item.decision))}</em></button>`;
   }).join("");
   requestAnimationFrame(() => {
     const timeline = $("#call-timeline");
@@ -1308,25 +1360,25 @@ function renderEvidence(group) {
   const hasCt = Boolean(group.ct);
   const hasDlp = Boolean(group.dlp);
   const policyRules = policyEvidence(group);
-  const patterns = ct.risk_patterns || [];
-  const features = ct.features || [];
+  const ctView = ctEvidencePresentation(ct);
   const dlpCount = Number(dlp.finding_count || 0);
-  const outputDlpCount = Number(outputDlp.finding_count || 0);
+  const inputDlpView = dlpScanPresentation(dlp, "input");
+  const outputDlpView = dlpScanPresentation(outputDlp, "output");
   const policyLines = !hasPolicy ? ["Trace 未记录 Policy Engine 证据"] : policyRules.length ? policyRules.slice(0, 5).map(reasonText) : ["未命中基础阻断规则"];
   const ctLines = !hasCt ? ["Trace 未记录 CT-TRM 评估"] : [
-    `风险分 ${Number(ct.total_score || 0)}${ct.hard_deny ? " · 命中不可降级的高风险证据" : ""}`,
-    ...patterns.slice(0, 2).map(item => `${item.pattern_id || "模式"} · ${item.name || item.explanation}`),
-    ...features.filter(item => ["AssetRisk", "ActionRisk", "BoundaryRisk", "TaintRisk"].includes(item.name)).slice(0, 2).map(item => `${item.name}: ${item.reason}`),
+    ctView.scoreLine,
+    ctView.factorLine,
   ];
   const dlpLines = !hasDlp ? ["Trace 未记录裁决前 DLP 输入扫描，不能推断为无风险"] : [
-    dlpCount ? `输入检测到 ${dlpCount} 项敏感内容` : "输入未检测到敏感明文",
+    inputDlpView.line,
+    inputDlpView.detail,
     ...(dlp.findings || []).slice(0, 1).map(item => `${item.secret_type || item.type || "secret"} · ${item.masked_value || "已脱敏"}`),
-    group.outputDlp ? (outputDlpCount ? `执行后输出检测到 ${outputDlpCount} 项敏感内容` : "执行后输出未检测到敏感明文") : (group.action?.details?.executed === false ? "工具未执行，无输出可扫描" : "未记录独立输出扫描事件"),
+    group.outputDlp ? outputDlpView.line : (group.action?.details?.executed === false ? "输出扫描｜未发生（工具未执行）" : "输出扫描｜未记录独立事件"),
   ];
   $("#evidence-panel").innerHTML = [
     ["Policy Engine", hasPolicy ? "规则证据" : "未记录", policyLines, policyRules.length],
-    ["CT-TRM", hasCt ? "风险评估" : "未记录", ctLines, patterns.length || Number(ct.total_score || 0) > 0],
-    ["DLP", hasDlp ? "检测结果" : "未记录", dlpLines, dlpCount > 0],
+    ["CT-TRM", hasCt ? "风险评估" : "未记录", ctLines, ctView.reachedThreshold || ctView.score > 0],
+    ["DLP", hasDlp ? inputDlpView.status : "未记录", dlpLines, dlpCount > 0],
   ].map(([title, status, lines, highlighted]) => `<article class="evidence-card ${highlighted ? "evidence-present" : ""}"><header><b>${esc(title)}</b><span>${esc(status)}</span></header><ul>${lines.map(line => `<li>${esc(humanizeMachineText(line, state.selectedTrace?.trace_id))}</li>`).join("")}</ul></article>`).join("")
     + rawDetails("查看完整模块返回值", {policy_engine: hasPolicy ? policy : null, ct_trm: hasCt ? ct : null, dlp_input: hasDlp ? dlp : null, dlp_output: group.outputDlp ? outputDlp : null}, {className: "evidence-raw"});
 }
@@ -1400,16 +1452,20 @@ function traceEventPresentation(event, trace, group) {
   if (phaseName === "final_answer") return {actor: "Agent", title: "任务结束", summary: truncate(humanizeMachineText(event.summary || "最终回答已记录", trace?.trace_id), 110)};
   if (phaseName === "agent_pause") return {actor: "审批", title: "调用暂停等待审批", summary: "工具尚未执行，参数保持冻结。"};
   if (phaseName === "agent_resume") return {actor: "审批", title: "审批流程已结束", summary: truncate(humanizeMachineText(event.summary || "Agent 根据审批结论继续", trace?.trace_id), 110)};
-  if (phaseName === "agent_plan") return {actor: runtimeIdentity(trace?.agent_id).entry, title: "捕获并标准化工具调用", summary: `${group?.tool || "工具"} · ${summary.oneLine}`};
+  if (phaseName === "agent_plan") return {actor: runtimeIdentity(trace?.agent_id, trace?.metadata).entry, title: "捕获并标准化工具调用", summary: `${group?.tool || "工具"} · ${summary.oneLine}`};
   if (phaseName === "dlp_scan") {
-    const count = Number(details.finding_count || 0);
     const stage = String(first(details.scan_stage, details.direction, details.target, "input")).toLowerCase();
-    const target = /output|result|response/.test(stage) ? "工具输出" : "输入参数";
-    return {actor: "DLP", title: `完成${target}敏感内容检测`, summary: count ? `${target}检测到 ${count} 项敏感特征；细节已脱敏` : `${target}未检测到敏感明文`};
+    const direction = /output|result|response/.test(stage) ? "output" : "input";
+    const target = direction === "output" ? "工具输出" : "输入参数";
+    const dlpView = dlpScanPresentation(details, direction);
+    const outputState = direction === "input" && group?.action?.details?.executed === false
+      ? " · 输出扫描｜未发生（工具未执行）"
+      : "";
+    return {actor: "DLP", title: `完成${target}敏感内容检测`, summary: `${dlpView.line} · ${dlpView.detail}${outputState}`, status: dlpView.status};
   }
   if (phaseName === "ct_trm_assessment") {
-    const pattern = (details.risk_patterns || [])[0];
-    return {actor: "CT-TRM", title: "形成上下文风险证据", summary: `风险分 ${Number(details.total_score || 0)}${pattern ? ` · ${pattern.name || pattern.explanation}` : " · 未识别到高风险模式"}`};
+    const ctView = ctEvidencePresentation(details);
+    return {actor: "CT-TRM", title: "形成上下文风险证据", summary: `${ctView.scoreLine} · ${ctView.factorLine}`, status: ctView.risk};
   }
   if (phaseName === "policy_decision") {
     const rules = (details.matched_rules || []).filter(Boolean);
@@ -1458,6 +1514,24 @@ const TRACE_STAGE_DEFINITIONS = [
   {key: "audit", title: "Audit 写入", phases: ["audit_record"]},
   {key: "answer", title: "Agent 响应", phases: ["agent_synthesis", "final_answer"]},
 ];
+
+function traceStageBusinessStatus(stage, event, readable) {
+  const details = event?.details || {};
+  if (stage.key === "request") return "已接收";
+  if (stage.key === "toolcall") return "已标准化";
+  if (stage.key === "policy") return (details.matched_rules || []).length ? "已命中" : "已检查";
+  if (stage.key === "ct") return readable.status || riskLabel(details.risk_level || event?.status);
+  if (stage.key === "dlp") return readable.status || dlpScanPresentation(details, "input").status;
+  if (stage.key === "fusion") return decisionLabel(first(details.decision, event?.status));
+  if (stage.key === "approval") {
+    if (event?.phase === "approval_decision") return details.approved ? "已批准" : "已拒绝";
+    return event?.phase === "agent_pause" ? "等待审批" : "已处理";
+  }
+  if (stage.key === "proxy") return "已处理";
+  if (stage.key === "audit") return "已写入";
+  if (stage.key === "answer") return "已完成";
+  return "已记录";
+}
 
 function compareTimelineEvents(left, right) {
   const leftTime = Date.parse(left?.timestamp || "");
@@ -1543,7 +1617,7 @@ function renderTraceEvents(trace, callId) {
     const lastEvent = stage.events.at(-1);
     const readable = traceEventPresentation(lastEvent, trace, group);
     let summary = readable.summary;
-    let status = String(lastEvent.status || "已记录").toUpperCase();
+    let status = traceStageBusinessStatus(stage, lastEvent, readable);
     if (stage.key === "toolcall") summary = `${group?.tool || "工具"} · ${semantics.object} · ${semantics.action}`;
     if (stage.key === "fusion") status = decisionLabel(first(lastEvent.details?.decision, lastEvent.status));
     if (stage.key === "proxy") {
@@ -1628,6 +1702,10 @@ function traceAgentId(traceId) {
   return state.traces.find(trace => trace.trace_id === traceId)?.agent_id || "";
 }
 
+function traceMetadata(traceId) {
+  return state.traces.find(trace => trace.trace_id === traceId)?.metadata || {};
+}
+
 function auditGroupExecutionLabel(group) {
   const lifecycle = auditGroupLifecycle(group);
   if (lifecycle.execution) return lifecycle.execution;
@@ -1676,8 +1754,8 @@ function renderAuditList() {
     const sameTrace = allGroups.filter(item => item.representative?.trace_id === event.trace_id).sort((a, b) => Number(a.events.at(-1)?.seq || 0) - Number(b.events.at(-1)?.seq || 0));
     const ordinal = sameTrace.findIndex(item => item.key === group.key) + 1;
     const semantics = semanticFor(event.tool, event.args || {});
-    const identity = runtimeIdentity(traceAgentId(event.trace_id));
-    return `<button class="audit-row ${active ? "active" : ""}" type="button" data-audit-seq="${event.seq}"><span class="${lifecycle.decision}">${esc(lifecycle.label)}</span><div><b>调用 ${ordinal || 1} · ${esc(event.tool)} · ${esc(truncate(semantics.object, 42))}</b><small>${esc(resultText)} · ${esc(taskSummaryForCall(event.task, event.tool, event.args || {}, null, 54))}</small><code>${esc(identity.entry)} · Trace ${esc(shortTrace(event.trace_id))} · ${group.events.length} 条关联记录</code></div><time>${esc(formatDate(group.events.at(-1)?.timestamp).slice(5, 16))}</time></button>`;
+    const identity = runtimeIdentity(traceAgentId(event.trace_id), traceMetadata(event.trace_id));
+    return `<button class="audit-row ${active ? "active" : ""}" type="button" data-audit-seq="${event.seq}"><span class="${lifecycle.decision}">${esc(lifecycle.label)}</span><div><b>ToolCall #${ordinal || 1} · ${esc(event.tool)} · ${esc(truncate(semantics.object, 42))}</b><small>${esc(resultText)} · ${esc(taskSummaryForCall(event.task, event.tool, event.args || {}, null, 54))}</small><code>${esc(identity.entry)} · Trace ${esc(shortTrace(event.trace_id))} · ${group.events.length} 条关联记录</code></div><time>${esc(formatDate(group.events.at(-1)?.timestamp).slice(5, 16))}</time></button>`;
   }).join("");
   requestAnimationFrame(() => {
     const active = node.querySelector(".audit-row.active");
@@ -1723,7 +1801,7 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
   const execution = executionState(group, event);
   const source = group ? sourceFrom(group, trace) : event.source || "未记录来源";
   const ct = group?.ct?.details || event.ct_trm || {};
-  const patterns = ct.risk_patterns || [];
+  const ctView = ctEvidencePresentation(ct);
   const policyRules = group ? policyEvidence(group) : [];
   const legacyFusedReasons = group ? [] : reasonCodes(event.reasons);
   const dlp = group?.dlp?.details || {};
@@ -1743,14 +1821,18 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
   const argumentInfo = argumentSummary(event.tool, presentationArgs);
   const resultRecord = [...auditRecords].reverse().find(item => item.event_type === "external_execution_result") || null;
   const approvalSummary = approvalEvents.length ? approvalEvents.map(item => item.phase === "approval_decision" ? (item.details?.approved ? "用户批准" : "用户拒绝") : item.title).filter(Boolean).join(" → ") : (lifecycle.label.includes("用户拒绝") ? "用户拒绝" : lifecycle.decision === "ask" ? "等待审批" : "本次调用无需审批");
-  const dlpInputText = group?.dlp ? (Number(dlp.finding_count || 0) ? `输入检测到 ${Number(dlp.finding_count)} 项敏感特征` : "输入未检测到敏感明文") : "未记录独立输入 DLP 事件";
-  const dlpOutputText = group?.outputDlp ? (Number(outputDlp.finding_count || 0) ? `输出检测到 ${Number(outputDlp.finding_count)} 项敏感特征` : "输出未检测到敏感明文") : (execution.key === "blocked" || execution.key === "rejected" ? "工具未执行，无输出可扫描" : "未记录独立输出 DLP 事件");
+  const inputDlpView = dlpScanPresentation(dlp, "input");
+  const outputDlpView = dlpScanPresentation(outputDlp, "output");
+  const dlpInputText = group?.dlp ? `${inputDlpView.line} · ${inputDlpView.detail}` : "输入扫描｜未记录独立事件";
+  const dlpOutputText = group?.outputDlp ? `${outputDlpView.line} · ${outputDlpView.detail}` : (execution.key === "blocked" || execution.key === "rejected" ? "输出扫描｜未发生（工具未执行）" : "输出扫描｜未记录独立事件");
   const policyText = group
     ? (policyRules.length ? policyRules.map(reasonText).join("、") : "未命中基础阻断规则")
     : "历史审计未保留独立 Policy 证据归属";
   const currentAudit = auditRecords.at(-1) || event;
   const auditFlow = auditRecords.map(item => `事件 #${item.seq}（${item.event_type === "external_execution_result" ? "执行结果" : "裁决"}）`).join(" → ");
-  const identity = runtimeIdentity(first(trace?.agent_id, traceAgentId(event.trace_id)));
+  const agentId = first(trace?.agent_id, traceAgentId(event.trace_id));
+  const agentMetadata = trace?.metadata || traceMetadata(event.trace_id);
+  const identity = runtimeIdentity(agentId, agentMetadata);
   const chainStatus = state.chainVerification?.valid === true ? "校验通过" : state.chainVerification?.valid === false ? "校验失败" : "已写入，待校验";
   const chainCount = state.chainVerification?.events ?? "—";
   const taskSummary = taskSummaryForCall(event.task, event.tool, presentationArgs, group, 180);
@@ -1758,11 +1840,11 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
   const pollution = pollutionFor(group, event, trace);
   const riskBasis = [
     `Policy｜${policyText}`,
-    `CT-TRM｜${group?.ct || event.ct_trm ? `风险分 ${Number(ct.total_score || 0)}${ct.hard_deny ? "，达到硬拒绝条件" : ""}` : "未记录独立评估"}`,
+    `CT-TRM｜${group?.ct || event.ct_trm ? `${ctView.scoreLine}；${ctView.factorLine}` : "未记录独立评估"}`,
     `DLP｜${dlpInputText}`,
   ];
   const auditTitle = `${event.tool} · ${semantics.object}${/读取|访问|列出|搜索/.test(semantics.action) ? "访问" : "操作"}`;
-  panel.innerHTML = `<div class="audit-detail-head"><div><span class="section-kicker">${esc(runtimeIdentityLabel(first(trace?.agent_id, traceAgentId(event.trace_id))))}</span><h2>${esc(auditTitle)}</h2>${identifierRef("Trace", event.trace_id)}</div><span class="decision-badge ${decisionView.decision}">${esc(decisionView.status)}</span></div>
+  panel.innerHTML = `<div class="audit-detail-head"><div><span class="section-kicker">${esc(runtimeIdentityLabel(agentId, {metadata: agentMetadata}))}</span><h2>${esc(auditTitle)}</h2>${identifierRef("Trace", event.trace_id)}</div><span class="decision-badge ${decisionView.decision}">${esc(decisionView.status)}</span></div>
     <div class="question-grid">
       <div class="question-card"><small>风险来源</small><b>${esc(riskSource.title)}</b><span>目标｜${esc(riskSource.target)}${riskSource.path ? `<br>关键路径｜<code>${esc(riskSource.path)}</code>` : ""}</span></div>
       <div class="question-card risk-basis"><small>风险依据</small><b>Policy / CT-TRM / DLP</b><span>${riskBasis.map(item => esc(humanizeMachineText(item, event.trace_id))).join("<br>")}</span></div>
@@ -1771,7 +1853,7 @@ function renderAuditDetail(event, trace, auditRecords = [event]) {
     <section class="detail-section"><h3>任务目标与待执行动作</h3><dl class="detail-facts"><div><dt>任务摘要</dt><dd>${esc(taskSummary)}</dd></div><div><dt>运行入口</dt><dd>${esc(identity.entry)}</dd></div>${identity.adapter ? `<div><dt>适配器</dt><dd>${esc(identity.adapter)}</dd></div>` : ""}${argumentInfo.rows.map(row => `<div><dt>${esc(row.label)}</dt><dd>${argumentRowMarkup(row, "span")}</dd></div>`).join("")}</dl>${rawDetails("查看完整任务", {task: event.task, trace_id: event.trace_id, agent_id: first(trace?.agent_id, traceAgentId(event.trace_id))})}</section>
     <section class="detail-section"><h3>参数安全语义</h3><dl class="detail-facts three"><div><dt>访问对象</dt><dd><span class="semantic-object-value">${esc(semantics.object)}${semantics.objectPath ? `<code>${esc(semantics.objectPath)}</code>` : ""}</span></dd></div><div><dt>操作行为</dt><dd>${esc(semantics.action)}</dd></div><div><dt>可能影响</dt><dd>${esc(semantics.effect)}</dd></div></dl></section>
     <section class="detail-section"><h3>来源与污染路径</h3><p class="readable-evidence ${pollution.risk ? "risk" : "neutral"}"><b>${esc(pollution.title)}</b><span>${esc(pollution.detail)}</span></p></section>
-    <section class="detail-section"><h3>风险证据</h3><div class="audit-evidence-grid"><div><b>Policy Engine</b><span>${esc(policyText)}</span></div><div><b>CT-TRM</b><span>风险分 ${esc(Number(ct.total_score || 0))}${patterns.length ? ` · ${esc(patterns.slice(0, 2).map(item => item.name || item.explanation).join("、"))}` : ""}</span></div><div><b>DLP</b><span>${esc(dlpInputText)}；${esc(dlpOutputText)}</span></div></div></section>
+    <section class="detail-section"><h3>风险证据</h3><div class="audit-evidence-grid"><div><b>Policy Engine</b><span>${esc(policyText)}</span></div><div><b>CT-TRM</b><span>${esc(ctView.scoreLine)}；${esc(ctView.factorLine)}</span></div><div><b>DLP</b><span>${esc(dlpInputText)}；${esc(dlpOutputText)}</span></div></div></section>
     <section class="detail-section"><h3>裁决、审批与执行</h3><dl class="detail-facts three"><div><dt>${esc(decisionView.source)}</dt><dd>${esc(decisionView.label)} · ${esc(group ? fusionDecisionReason(group) : decisionReason({decision: event.decision}))}</dd></div><div><dt>审批过程</dt><dd>${esc(approvalSummary)}</dd></div><div><dt>执行状态</dt><dd>${esc(execution.title)}</dd></div></dl></section>
     <section class="detail-section"><h3>审计完整性</h3><dl class="detail-facts audit-integrity-facts"><div><dt>审计完整性</dt><dd>${esc(chainStatus)}</dd></div><div><dt>当前事件</dt><dd>#${esc(currentAudit.seq)}</dd></div><div><dt>全局审计链</dt><dd>${esc(chainCount)} 条记录${state.chainVerification?.valid === true ? "完整" : ""}</dd></div><div><dt>Transparency Trace</dt><dd>${esc(traceEvents.length)} 个关联事件</dd></div></dl><details class="raw-details integrity-details"><summary><span>查看完整证据链</span><em>展开</em></summary><div class="integrity-details-body"><p class="audit-record-flow">本次调用关联：${esc(auditFlow)}</p><div class="hash-link"><div><small>当前记录的前序 Hash</small>${identifierRef("Hash", currentAudit.prev_hash)}</div><i>→</i><div><small>当前记录 Hash</small>${identifierRef("Hash", currentAudit.hash)}</div></div><p>${esc(integrityText)} 任一关键记录被改动，后续记录将无法通过校验。</p></div></details></section>
     <section class="detail-section"><h3>关联 Transparency Trace</h3>${traceEvents.length ? `<div class="mini-trace">${traceEvents.map(item => { const readable = traceEventPresentation(item, trace, group); return `<div><span>#${esc(item.seq)}</span><b>${esc(readable.title)}</b><code>${esc(readable.summary)}</code></div>`; }).join("")}</div>` : `<div class="empty-state">该历史记录没有可读取的 Transparency Trace；审计记录仍然保留。</div>`}</section>

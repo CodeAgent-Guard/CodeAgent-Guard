@@ -8,6 +8,7 @@ import mimetypes
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -64,6 +65,13 @@ _INSTANCE_LOCK_PATH = DATA / "server.instance.lock"
 _INSTANCE_ARBITER_STALE_AFTER = 10.0
 _INSTANCE_ARBITER_WAIT_TIMEOUT = 12.0
 _INSTANCE_ARBITER_POLL_INTERVAL = 0.05
+_SERVER_LOG_PATH = DATA / "server.log"
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionAbortedError,
+    ConnectionResetError,
+)
+_CONSOLE_LOCK = threading.Lock()
 _LOCK_PORT = int(os.getenv("PORT", "8000"))
 for index, argument in enumerate(os.sys.argv[:-1]):
     if argument == "--port":
@@ -71,6 +79,26 @@ for index, argument in enumerate(os.sys.argv[:-1]):
             _LOCK_PORT = int(os.sys.argv[index + 1])
         except ValueError:
             pass
+
+
+def _console_line(message: str) -> None:
+    """Write an immediate console line without coupling service health to stdout."""
+    with _CONSOLE_LOCK:
+        try:
+            with _SERVER_LOG_PATH.open("a", encoding="utf-8") as log_handle:
+                log_handle.write(f"{message}\n")
+        except OSError:
+            # A read-only/unavailable data directory must not disable the API.
+            pass
+        try:
+            print(message, flush=True)
+        except OSError:
+            # Avoid another EPIPE during interpreter shutdown after the owner of
+            # an IDE/WSL output pipe has disappeared.
+            try:
+                sys.stdout = open(os.devnull, "w", encoding="utf-8")
+            except OSError:
+                pass
 
 
 def _release_instance_lock(lock_path: Path) -> None:
@@ -241,7 +269,8 @@ def _acquire_instance_lock(
                     raise RuntimeError(
                         "CodeAgent Guard is already running for this data directory"
                         f"{location}。请打开 http://localhost:{port or 8000}/api/health "
-                        "确认实例；不要结束 systemd-resolve 等无关系统进程。"
+                        "确认实例；实时请求日志可运行 ./start.sh --logs；"
+                        "不要结束 systemd-resolve 等无关系统进程。"
                     )
                 try:
                     lock_path.unlink()
@@ -419,16 +448,25 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "CodeAgentGuard/1.0"
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[http] {self.address_string()} {fmt % args}")
+        # A server started from an IDE or a closed WSL terminal can outlive the
+        # process that owned its stdout pipe. HTTP logging must never turn that
+        # detached console into an API failure.
+        _console_line(f"[http] {self.address_string()} {fmt % args}")
 
     def _json(self, data: object, status: int = 200) -> None:
         payload = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+        except _CLIENT_DISCONNECT_ERRORS:
+            # Refreshing or leaving a page may cancel an in-flight poll. That is
+            # a normal client disconnect, not a Trace/API error to report back
+            # over the same socket.
+            self.close_connection = True
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -535,6 +573,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(transparency.snapshot(trace_id))
             else:
                 self._static(parsed.path)
+        except _CLIENT_DISCONNECT_ERRORS:
+            self.close_connection = True
         except Exception as exc:
             self._json({"error": str(exc)}, 400)
 
@@ -717,10 +757,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._json({"error": "API endpoint not found"}, 404)
+        except _CLIENT_DISCONNECT_ERRORS:
+            self.close_connection = True
         except ValueError as exc:
             self._json({"error": str(exc)}, 400)
         except Exception as exc:
-            traceback.print_exc()
+            try:
+                traceback.print_exc()
+            except OSError:
+                pass
             self._json({"error": str(exc)}, 500)
 
     def _static(self, request_path: str) -> None:
@@ -739,12 +784,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
         content = target.read_bytes()
         mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        self.send_response(200)
-        self.send_header("Content-Type", f"{mime}; charset=utf-8" if mime.startswith("text/") else mime)
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(content)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", f"{mime}; charset=utf-8" if mime.startswith("text/") else mime)
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(content)
+        except _CLIENT_DISCONNECT_ERRORS:
+            self.close_connection = True
 
 
 def main() -> None:
@@ -759,8 +807,8 @@ def main() -> None:
         raise SystemExit(
             f"CodeAgent Guard 无法监听 {args.host}:{args.port}: {exc}"
         ) from None
-    print(f"CodeAgent Guard: http://localhost:{args.port}")
-    print(f"Workspace: {WORKSPACE}")
+    _console_line(f"CodeAgent Guard: http://localhost:{args.port}")
+    _console_line(f"Workspace: {WORKSPACE}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
