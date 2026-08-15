@@ -219,20 +219,45 @@ class LLMProvider:
             endpoint += "/v1/messages"
         system_parts = [m["content"] for m in messages if m["role"] == "system"]
         anthropic_messages = []
+        pending_tool_results = []
+
+        def flush_tool_results() -> None:
+            if not pending_tool_results:
+                return
+            anthropic_messages.append({
+                "role": "user",
+                "content": list(pending_tool_results),
+            })
+            pending_tool_results.clear()
+
         for message in messages:
             role = message.get("role")
             if role == "system":
                 continue
             if role == "tool":
-                anthropic_messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": message.get("tool_call_id", ""),
-                        "content": str(message.get("content", "")),
-                    }],
+                raw_content = str(message.get("content", ""))
+                try:
+                    parsed_content = json.loads(raw_content)
+                except (json.JSONDecodeError, TypeError):
+                    parsed_content = {}
+                is_error = bool(
+                    parsed_content.get("action") in {"deny", "cancelled"}
+                    or parsed_content.get("approval_status")
+                    in {"rejected", "expired"}
+                    or parsed_content.get("execution_status")
+                    in {"failed", "unknown_side_effects"}
+                    or parsed_content.get("executed") is False
+                )
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": message.get("tool_call_id", ""),
+                    "content": raw_content,
+                    **({"is_error": True} if is_error else {}),
                 })
-            elif role == "assistant" and message.get("tool_calls"):
+                continue
+
+            flush_tool_results()
+            if role == "assistant" and message.get("tool_calls"):
                 content = []
                 if message.get("content"):
                     content.append({"type": "text", "text": message["content"]})
@@ -254,6 +279,7 @@ class LLMProvider:
                     "role": role,
                     "content": message.get("content", ""),
                 })
+        flush_tool_results()
         payload: dict[str, Any] = {
             "model": self.config.model,
             "system": "\n".join(system_parts),

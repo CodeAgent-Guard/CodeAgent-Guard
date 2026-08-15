@@ -168,7 +168,9 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 str(event.get("trace_id") or ""),
                 call_id,
             )
-            if authorization is None or authorization.get("action") != "allow":
+            if authorization is None or not self._execution_is_authorized(
+                authorization
+            ):
                 continue
             result_key = f"opencode:{call_id}:external-result"
             audit_key = f"opencode:{call_id}:external-result-audit"
@@ -239,7 +241,8 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 cached = self._authorization_cache.get(cache_key)
                 if (
                     cached is not None
-                    and cached.get("action") == authorization.get("action")
+                    and self._authorization_state(cached)
+                    == self._authorization_state(authorization)
                 ):
                     return copy.deepcopy(cached)
                 return self._authorization_response(authorization)
@@ -260,6 +263,8 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 self._authorization_cache.pop(next(iter(self._authorization_cache)))
             self._authorization_cache[cache_key] = copy.deepcopy(result)
             self._authorized_calls[cache_key] = {
+                "trace_id": trace_id,
+                "call_id": actual_call_id,
                 "fingerprint": request_fingerprint,
                 "authorization_fingerprint": authorization_fingerprint,
                 "raw_tool": tool,
@@ -274,7 +279,17 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 "conversation_id": str(
                     metadata.get("session_id") or trace_id
                 ),
-                "action": result.get("action"),
+                "fusion_action": (
+                    result.get("fusion_action") or result.get("action")
+                ),
+                "action": (
+                    result.get("fusion_action") or result.get("action")
+                ),
+                "approval_status": result.get("approval_status"),
+                "execution_authorized": result.get("execution_authorized"),
+                "execution_attempted": result.get("execution_attempted"),
+                "execution_status": result.get("execution_status"),
+                "execution_error": result.get("execution_error"),
                 "risk_level": result.get("risk_level"),
                 "reasons": list(result.get("reasons") or []),
                 "audit": copy.deepcopy(result.get("audit") or {}),
@@ -373,9 +388,9 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 actual_call_id,
                 authorization,
             )
-            if authorization.get("action") != "allow":
+            if not self._execution_is_authorized(authorization):
                 raise ValueError(
-                    "OpenCode tool result is not backed by a final Allow decision"
+                    "OpenCode tool result is not backed by execution authorization"
                 )
             self._authorized_calls[cache_key] = authorization
             return self._record_tool_result_uncached(
@@ -412,13 +427,26 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 result_payload,
             )
         result_error = self._external_result_error(sanitized_result)
-        result_status = "error" if result_error else "success"
+        result_status = "failed" if result_error else "success"
+        fusion_action = str(
+            authorization.get("fusion_action")
+            or authorization.get("action")
+            or ""
+        )
+        approval_status = str(
+            authorization.get("approval_status") or "not_required"
+        )
         result_evidence = {
             "tool": mapped_tool,
             "external_tool": raw_tool,
             "result": TransparencyService.redact(sanitized_result),
             "dlp_scan": TransparencyService.redact(output_scan),
+            "fusion_action": fusion_action,
+            "approval_status": approval_status,
+            "execution_authorized": True,
+            "execution_attempted": True,
             "execution_status": result_status,
+            "execution_error": TransparencyService.redact(result_error),
         }
         audit_store = getattr(self.gateway, "audit", None)
         if audit_store is None:
@@ -444,7 +472,10 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 mapped_tool,
                 mapped_args,
                 sanitized_result,
-                "deny" if result_error else "allow",
+                # This path is reached only after execution authorization.
+                # Keep the persisted lifecycle Fusion action (including ASK)
+                # separate from the ALLOW fact needed by chain-risk state.
+                "allow",
                 trace_id=trace_id,
                 call_id=call_id,
                 conversation_id=str(
@@ -457,16 +488,9 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             task=str(authorization.get("task") or "OpenCode tool call"),
             tool=mapped_tool,
             args=TransparencyService.redact(mapped_args),
-            decision="allow",
+            decision=fusion_action,
             risk_level=str(authorization.get("risk_level") or "low"),
-            reasons=(
-                list(authorization.get("reasons") or [])
-                if not result_error
-                else [
-                    *list(authorization.get("reasons") or []),
-                    "external_tool_execution_failed",
-                ]
-            ),
+            reasons=list(authorization.get("reasons") or []),
             source=str(authorization.get("source") or "agent"),
             tainted=bool(authorization.get("tainted", False)),
             result_summary=TransparencyService.result_summary(sanitized_result),
@@ -474,6 +498,11 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             event_type="external_execution_result",
             call_id=call_id,
             execution_status=result_status,
+            execution_attempted=True,
+            approval_status=approval_status,
+            execution_error=str(
+                TransparencyService.redact(result_error)
+            ),
             result_fingerprint=result_fingerprint,
             result_evidence=result_evidence,
         )
@@ -504,6 +533,28 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             result_evidence.get("execution_status")
             or result_audit.get("execution_status")
             or "success"
+        )
+        # Historical external-result rows used ``error``.  Keep those audit
+        # hashes untouched while exposing the current execution vocabulary.
+        if result_status == "error":
+            result_status = "failed"
+        fusion_action = str(
+            result_evidence.get("fusion_action")
+            or authorization.get("fusion_action")
+            or authorization.get("action")
+            or result_audit.get("decision")
+            or ""
+        )
+        approval_status = str(
+            result_evidence.get("approval_status")
+            or authorization.get("approval_status")
+            or result_audit.get("approval_status")
+            or "not_required"
+        )
+        execution_error = str(
+            result_evidence.get("execution_error")
+            or result_audit.get("execution_error")
+            or ""
         )
         if output_scan.get("finding_count"):
             output_evidence = dict(output_scan)
@@ -538,6 +589,12 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 "external_tool": raw_tool,
                 "result": sanitized_result,
                 "execution_delegated": True,
+                "fusion_action": fusion_action,
+                "approval_status": approval_status,
+                "execution_authorized": True,
+                "execution_attempted": True,
+                "execution_status": result_status,
+                "execution_error": execution_error,
             },
             event_key=f"opencode:{call_id}:external-result",
         )
@@ -561,7 +618,12 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 ).get("seq"),
                 "prev_hash": result_audit["prev_hash"],
                 "hash": result_audit["hash"],
+                "fusion_action": fusion_action,
+                "approval_status": approval_status,
+                "execution_authorized": True,
+                "execution_attempted": True,
                 "execution_status": result_status,
+                "execution_error": execution_error,
             },
             event_key=f"opencode:{call_id}:external-result-audit",
         )
@@ -683,10 +745,30 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
 
     @staticmethod
     def _authorization_response(authorization: dict) -> dict:
+        fusion_action = str(
+            authorization.get("fusion_action")
+            or authorization.get("action")
+            or ""
+        )
         return {
             "trace_id": authorization.get("trace_id"),
             "call_id": authorization.get("call_id"),
-            "action": authorization.get("action"),
+            "fusion_action": fusion_action,
+            # Backward-compatible alias; never represents execution outcome.
+            "action": fusion_action,
+            "approval_status": (
+                authorization.get("approval_status") or "not_required"
+            ),
+            "execution_authorized": bool(
+                authorization.get("execution_authorized")
+            ),
+            "execution_attempted": bool(
+                authorization.get("execution_attempted")
+            ),
+            "execution_status": (
+                authorization.get("execution_status") or "not_executed"
+            ),
+            "execution_error": authorization.get("execution_error") or "",
             "risk_level": authorization.get("risk_level"),
             "reasons": list(authorization.get("reasons") or []),
             "result": copy.deepcopy(authorization.get("result") or {}),
@@ -702,6 +784,36 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 ),
             },
         }
+
+    @staticmethod
+    def _authorization_state(value: dict) -> tuple:
+        """Fields that can change while an ASK approval is being resolved."""
+        return (
+            value.get("fusion_action") or value.get("action"),
+            value.get("approval_status") or "not_required",
+            bool(value.get("execution_authorized")),
+            bool(value.get("execution_attempted")),
+            value.get("execution_status") or "not_executed",
+        )
+
+    @staticmethod
+    def _execution_is_authorized(authorization: dict) -> bool:
+        """Accept ALLOW or an approved ASK only when execution is explicit."""
+        explicit = authorization.get("execution_authorized")
+        if explicit is not None:
+            return bool(explicit)
+        # Compatibility for traces written before execution_authorized existed.
+        fusion_action = str(
+            authorization.get("fusion_action")
+            or authorization.get("action")
+            or ""
+        )
+        approval_status = str(
+            authorization.get("approval_status") or "not_required"
+        )
+        return fusion_action == "allow" or (
+            fusion_action == "ask" and approval_status == "approved"
+        )
 
     def _existing_result_audit(
         self,
@@ -776,13 +888,13 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             or not authorization_fingerprint
         ):
             return None
-        policy_event = policy_events[-1]
+        policy_event = policy_events[0]
         policy_details = policy_event.get("details", {})
         # New traces assign the final Allow/Ask/Deny outcome exclusively to
         # Decision Fusion.  Traces written by older releases do not contain
         # that phase, so retain a strict fallback to their policy event.
         if fusion_events:
-            decision_event = fusion_events[-1]
+            decision_event = fusion_events[0]
             decision_details = decision_event.get("details", {})
         else:
             if policy_details.get("evidence_only"):
@@ -791,32 +903,94 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 return None
             decision_event = policy_event
             decision_details = policy_details
-        audit_event = audit_events[-1]
-        audit_details = audit_event.get("details", {})
+        decision_audit_event = next(
+            (
+                event for event in audit_events
+                if event.get("details", {}).get("audit_type")
+                in {None, "", "decision"}
+            ),
+            None,
+        )
+        if decision_audit_event is None:
+            return None
+        lifecycle_audit_event = audit_events[-1]
+        decision_audit_details = decision_audit_event.get("details", {})
+        lifecycle_audit_details = lifecycle_audit_event.get("details", {})
         audit_store = getattr(self.gateway, "audit", None)
-        audit_seq = audit_details.get("audit_seq")
         getter = getattr(audit_store, "get_event", None)
-        audit_record = (
-            getter(int(audit_seq))
-            if getter is not None and audit_seq
+        decision_audit_seq = decision_audit_details.get("audit_seq")
+        decision_audit_record = (
+            getter(int(decision_audit_seq))
+            if getter is not None and decision_audit_seq
             else None
+        )
+        lifecycle_audit_seq = lifecycle_audit_details.get("audit_seq")
+        lifecycle_audit_record = (
+            getter(int(lifecycle_audit_seq))
+            if getter is not None and lifecycle_audit_seq
+            else decision_audit_record
         )
         mapped_tool = str(
             policy_details.get("tool") or details.get("tool") or ""
         )
-        final_action = (
+        traced_fusion_action = (
             decision_details.get("decision")
+            or decision_details.get("fusion_action")
             or decision_event.get("status")
         )
         if (
-            audit_record is None
-            or audit_record.get("event_type") != "decision"
-            or audit_record.get("trace_id") != trace_id
-            or audit_record.get("call_id") != call_id
-            or audit_record.get("tool") != mapped_tool
-            or audit_record.get("decision") != final_action
+            decision_audit_record is None
+            or decision_audit_record.get("event_type") != "decision"
+            or decision_audit_record.get("trace_id") != trace_id
+            or decision_audit_record.get("call_id") != call_id
+            or decision_audit_record.get("tool") != mapped_tool
+            or decision_audit_record.get("decision") != traced_fusion_action
+            or lifecycle_audit_record is None
+            or lifecycle_audit_record.get("trace_id") != trace_id
+            or lifecycle_audit_record.get("call_id") != call_id
+            or lifecycle_audit_record.get("tool") != mapped_tool
         ):
             return None
+        lifecycle_evidence = lifecycle_audit_record.get("result_evidence") or {}
+        fusion_action = str(
+            lifecycle_evidence.get("fusion_action")
+            or decision_audit_record.get("decision")
+            or traced_fusion_action
+            or ""
+        )
+        approval_event = next(
+            (
+                event for event in reversed(events)
+                if event.get("phase") == "approval_decision"
+            ),
+            None,
+        )
+        approval_status = str(
+            lifecycle_evidence.get("approval_status")
+            or lifecycle_audit_record.get("approval_status")
+            or (approval_event or {}).get("status")
+            or decision_audit_record.get("approval_status")
+            or ("pending" if fusion_action == "ask" else "not_required")
+        )
+        explicit_execution_authorized = lifecycle_evidence.get(
+            "execution_authorized"
+        )
+        if explicit_execution_authorized is None:
+            execution_authorized = (
+                lifecycle_audit_record.get("decision") == "allow"
+                and approval_status not in {"pending", "rejected", "expired"}
+            )
+        else:
+            execution_authorized = bool(explicit_execution_authorized)
+        execution_attempted = lifecycle_audit_record.get(
+            "execution_attempted"
+        )
+        execution_status = str(
+            lifecycle_audit_record.get("execution_status") or "not_executed"
+        )
+        execution_error = str(
+            lifecycle_audit_record.get("execution_error") or ""
+        )
         return {
             "trace_id": trace_id,
             "call_id": call_id,
@@ -836,7 +1010,13 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
             "conversation_id": str(
                 metadata.get("session_id") or trace_id
             ),
-            "action": final_action,
+            "fusion_action": fusion_action,
+            "action": fusion_action,
+            "approval_status": approval_status,
+            "execution_authorized": execution_authorized,
+            "execution_attempted": bool(execution_attempted),
+            "execution_status": execution_status,
+            "execution_error": execution_error,
             "risk_level": (
                 decision_details.get("risk_level")
                 or policy_details.get("risk_level")
@@ -847,7 +1027,13 @@ class OpenCodeToolProxyAdapter(ExternalAgentAdapter):
                 or policy_details.get("matched_rules")
                 or []
             ),
-            "audit": audit_record,
+            "audit": decision_audit_record,
+            "resolution_audit": (
+                lifecycle_audit_record
+                if lifecycle_audit_record.get("seq")
+                != decision_audit_record.get("seq")
+                else None
+            ),
             "approval_id": next(
                 (
                     event.get("details", {}).get("approval_id")

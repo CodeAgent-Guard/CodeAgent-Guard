@@ -14,6 +14,15 @@ from .state import RuntimeStateStore
 from .transparency import TransparencyService
 
 
+class ApprovalConflictError(ValueError):
+    """A persisted approval was claimed or completed by another resolver."""
+
+    def __init__(self, code: str, status: str) -> None:
+        self.code = code
+        self.status = status
+        super().__init__(code)
+
+
 class ToolProxy:
     """Unified security gateway between any Agent and external tools."""
 
@@ -49,6 +58,7 @@ class ToolProxy:
         self.state_store = state_store
         self.approval_ttl_seconds = approval_ttl_seconds
         self._pending_approvals: dict[str, tuple[ToolCall, bool]] = {}
+        self._pending_approval_contexts: dict[str, dict] = {}
         self._approval_lock = threading.RLock()
         self._restore_pending_approvals()
 
@@ -59,7 +69,13 @@ class ToolProxy:
         """Run policy/audit for an external tool that will execute elsewhere."""
         return self._handle(call, execute=False)
 
-    def _handle(self, call: ToolCall, *, execute: bool) -> dict:
+    def _handle(
+        self,
+        call: ToolCall,
+        *,
+        execute: bool,
+        approval_context: dict | None = None,
+    ) -> dict:
         trace_metadata = {
             "source": call.source,
             **TransparencyService.redact(call.metadata or {}),
@@ -205,73 +221,95 @@ class ToolProxy:
                 "evidence_only": True,
             },
         )
+        evaluation_action = str(decision.action)
+        approval_context = approval_context or {}
+        initial_fusion_action = str(
+            approval_context.get("initial_fusion_action") or ""
+        )
+        approval_status = str(
+            approval_context.get("approval_status") or "not_required"
+        )
+        # A successful human approval does not rewrite the original ASK into
+        # ALLOW.  The approved call is re-evaluated, and that recheck may still
+        # produce a real DENY.  Otherwise the lifecycle keeps ASK as its fused
+        # decision while execution and approval remain independent facts.
+        fusion_action = evaluation_action
+        fusion_risk_level = str(decision.risk_level)
+        fusion_reasons = list(decision.reasons)
+        if initial_fusion_action == "ask" and evaluation_action == "allow":
+            fusion_action = "ask"
+            fusion_risk_level = str(
+                approval_context.get("initial_risk_level")
+                or decision.risk_level
+            )
+            fusion_reasons = list(
+                approval_context.get("initial_reasons")
+                or decision.reasons
+            )
+        execution_authorized = evaluation_action == "allow"
         self.transparency.emit(
             call.trace_id,
-            phase="decision_fusion",
+            phase=(
+                "approval_recheck"
+                if approval_context and evaluation_action == "allow"
+                else "decision_fusion"
+            ),
             actor="decision_fusion",
-            label="Decision Fusion",
-            status=decision.action,
-            title=f"最终安全裁决：{decision.action.upper()}",
+            label=(
+                "审批后安全复核"
+                if approval_context and evaluation_action == "allow"
+                else "Decision Fusion"
+            ),
+            status=evaluation_action,
+            title=(
+                f"审批后安全复核：{evaluation_action.upper()}"
+                if approval_context
+                else f"最终安全裁决：{evaluation_action.upper()}"
+            ),
             summary=self._decision_fusion_summary(
-                decision.action,
+                evaluation_action,
                 decision.risk_level,
                 decision.reasons,
             ),
             details={
                 "call_id": call.call_id,
                 "tool": call.tool,
-                "decision": decision.action,
-                "risk_level": decision.risk_level,
-                "reasons": list(decision.reasons),
+                "decision": fusion_action,
+                "fusion_action": fusion_action,
+                "approval_recheck_action": (
+                    evaluation_action if approval_context else ""
+                ),
+                "approval_status": approval_status,
+                "approval_id": approval_context.get("approval_id"),
+                "risk_level": fusion_risk_level,
+                "reasons": fusion_reasons,
+                "approval_recheck_risk_level": (
+                    decision.risk_level if approval_context else ""
+                ),
+                "approval_recheck_reasons": (
+                    list(decision.reasons) if approval_context else []
+                ),
                 "evidence_sources": ["policy_engine", "ct_trm", "dlp"],
             },
         )
 
         result: dict = {}
         summary = "Policy blocked execution"
-        action = decision.action
-        if action == "allow":
-            title = f"执行 {call.tool}" if execute else f"批准 {call.tool}"
-            summary_text = (
-                f"Tool Proxy 将批准后的参数交给 {call.tool} 执行器。"
-                if execute
-                else (
-                    "Tool Proxy 已完成策略审批，实际执行权返回给外部 Agent。"
-                )
-            )
-            self.transparency.emit(
-                call.trace_id,
-                phase="tool_action",
-                actor="tool_proxy",
-                label="Tool Proxy 行动",
-                status="executed" if execute else "approved",
-                title=title,
-                summary=summary_text,
-                details={
-                    "call_id": call.call_id,
-                    "tool": call.tool,
-                    "executed": execute,
-                    "execution_delegated": not execute,
-                    "arguments": decision.normalized_args,
-                },
-            )
+        execution_attempted = False
+        execution_status = "not_executed"
+        execution_error = ""
+        approval_id = str(approval_context.get("approval_id") or "") or None
+        audit_event_type = (
+            "approval_resolution" if approval_context else "decision"
+        )
+
+        if evaluation_action == "allow":
             if execute:
+                execution_attempted = True
                 try:
                     raw_result = self.executor.execute(
                         call.tool, decision.normalized_args
                     )
-                    observer = getattr(self.policy, "observe_tool_result", None)
-                    if observer is not None:
-                        observer(
-                            call.tool,
-                            decision.normalized_args,
-                            raw_result,
-                            action,
-                            trace_id=call.trace_id,
-                            call_id=call.call_id,
-                            conversation_id=call.conversation_id,
-                            taint_matches=decision.taint_matches,
-                        )
                     result = raw_result
                     output_scan = {}
                     result_scanner = getattr(self.policy, "scan_tool_result", None)
@@ -287,9 +325,7 @@ class ToolProxy:
                             label="DLP 输出脱敏",
                             status="redacted",
                             title="DLP 输出扫描：REDACTED",
-                            summary=(
-                                "工具结果包含敏感数据，已在返回与审计前脱敏。"
-                            ),
+                            summary="工具结果包含敏感数据，已在返回与审计前脱敏。",
                             details={
                                 "call_id": call.call_id,
                                 "tool": call.tool,
@@ -297,39 +333,87 @@ class ToolProxy:
                                 "evidence_only": True,
                             },
                         )
+                    execution_status = "success"
                     summary = self._summarize(result)
                 except Exception as exc:
-                    action = "deny"
-                    decision.action = "deny"
-                    decision.risk_level = "medium"
-                    if "tool_execution_failed" not in decision.reasons:
-                        decision.reasons.append("tool_execution_failed")
-                    result = {"error": str(exc)}
-                    summary = f"Execution failed: {exc}"
-                    observer = getattr(self.policy, "observe_tool_result", None)
-                    if observer is not None:
-                        observer(
-                            call.tool,
-                            decision.normalized_args,
-                            result,
-                            action,
-                            trace_id=call.trace_id,
-                            call_id=call.call_id,
-                            conversation_id=call.conversation_id,
-                            taint_matches=decision.taint_matches,
-                        )
+                    # The security decision was already ALLOW and the executor
+                    # was entered.  Preserve that decision and report execution
+                    # uncertainty independently; never rewrite it as DENY.
+                    execution_status = "unknown_side_effects"
+                    execution_error = str(exc)
+                    result = {"error": execution_error}
+                    summary = f"Execution failed after executor entry: {exc}"
+                observer = getattr(self.policy, "observe_tool_result", None)
+                if observer is not None:
+                    observer(
+                        call.tool,
+                        decision.normalized_args,
+                        result,
+                        # Chain-state observation records whether this result
+                        # came from an authorized execution.  An approved ASK
+                        # keeps ASK as its lifecycle Fusion decision, but its
+                        # approval recheck is ALLOW and the executed result
+                        # must still update provenance/chain state.
+                        evaluation_action,
+                        trace_id=call.trace_id,
+                        call_id=call.call_id,
+                        conversation_id=call.conversation_id,
+                        taint_matches=decision.taint_matches,
+                    )
+                self.transparency.emit(
+                    call.trace_id,
+                    phase="tool_action",
+                    actor="tool_proxy",
+                    label="Tool Proxy 行动",
+                    status=(
+                        "executed"
+                        if execution_status == "success"
+                        else execution_status
+                    ),
+                    title=(
+                        f"执行 {call.tool}"
+                        if execution_status == "success"
+                        else f"{call.tool} 执行过程发生异常"
+                    ),
+                    summary=(
+                        f"Tool Proxy 已将参数交给 {call.tool} 执行器。"
+                        if execution_status == "success"
+                        else "执行器已经被调用，无法确认异常前是否产生部分副作用。"
+                    ),
+                    details={
+                        "call_id": call.call_id,
+                        "tool": call.tool,
+                        "executed": execution_status == "success",
+                        "execution_attempted": True,
+                        "execution_status": execution_status,
+                        "execution_error": execution_error,
+                        "execution_delegated": False,
+                        "fusion_action": fusion_action,
+                        "approval_status": approval_status,
+                        "arguments": decision.normalized_args,
+                    },
+                )
                 self.transparency.emit(
                     call.trace_id,
                     phase="tool_result",
                     actor="tool_executor",
                     label="工具执行结果",
-                    status="success" if not result.get("error") else "error",
-                    title=f"{call.tool} 返回结果",
+                    status=execution_status,
+                    title=(
+                        f"{call.tool} 返回结果"
+                        if execution_status == "success"
+                        else f"{call.tool} 执行失败"
+                    ),
                     summary=TransparencyService.result_summary(result),
                     details={
                         "call_id": call.call_id,
                         "tool": call.tool,
                         "result": result,
+                        "fusion_action": fusion_action,
+                        "approval_status": approval_status,
+                        "execution_attempted": True,
+                        "execution_status": execution_status,
+                        "execution_error": execution_error,
                     },
                 )
             else:
@@ -339,7 +423,27 @@ class ToolProxy:
                     "normalized_args": decision.normalized_args,
                     "result_unavailable": True,
                 }
-                summary = "Policy approved delegated external execution"
+                summary = "Security check approved delegated external execution"
+                self.transparency.emit(
+                    call.trace_id,
+                    phase="tool_action",
+                    actor="tool_proxy",
+                    label="Tool Proxy 行动",
+                    status="approved",
+                    title=f"批准 {call.tool}",
+                    summary="实际执行权已返回给外部 Agent，Guard 尚未收到执行结果。",
+                    details={
+                        "call_id": call.call_id,
+                        "tool": call.tool,
+                        "executed": False,
+                        "execution_attempted": False,
+                        "execution_status": "not_executed",
+                        "execution_delegated": True,
+                        "fusion_action": fusion_action,
+                        "approval_status": approval_status,
+                        "arguments": decision.normalized_args,
+                    },
+                )
                 self.transparency.emit(
                     call.trace_id,
                     phase="tool_result",
@@ -347,20 +451,20 @@ class ToolProxy:
                     label="外部工具执行结果",
                     status="unavailable",
                     title=f"{call.tool} 结果由外部 Agent 持有",
-                    summary=(
-                        "Guard 仅完成执行前授权，当前未收到外部工具结果。"
-                    ),
+                    summary="Guard 仅完成执行前授权，当前未收到外部工具结果。",
                     details={
                         "call_id": call.call_id,
                         "tool": call.tool,
                         "execution_delegated": True,
+                        "execution_attempted": False,
+                        "execution_status": "not_executed",
                         "result_unavailable": True,
                     },
                 )
         else:
-            approval_id = None
-            if action == "ask":
+            if evaluation_action == "ask":
                 approval_id = f"approval-{uuid.uuid4().hex[:12]}"
+                approval_status = "pending"
                 with self._approval_lock:
                     approved_call = replace(
                         call,
@@ -371,11 +475,19 @@ class ToolProxy:
                         approved_call,
                         execute,
                     )
+                    self._pending_approval_contexts[approval_id] = {
+                        "initial_fusion_action": "ask",
+                        "initial_risk_level": decision.risk_level,
+                        "initial_reasons": list(decision.reasons),
+                    }
                     if self.state_store is not None:
                         self.state_store.save_approval(
                             approval_id,
                             self._call_dict(approved_call),
                             execute=execute,
+                            fusion_action="ask",
+                            risk_level=decision.risk_level,
+                            reasons=list(decision.reasons),
                             ttl_seconds=self.approval_ttl_seconds,
                         )
                 summary = "Waiting for explicit user confirmation"
@@ -389,17 +501,26 @@ class ToolProxy:
                 phase="tool_action",
                 actor="tool_proxy",
                 label="Tool Proxy 行动",
-                status=action,
-                title=f"{'暂停' if action == 'ask' else '阻断'} {call.tool}",
+                status=evaluation_action,
+                title=(
+                    f"暂停 {call.tool}"
+                    if evaluation_action == "ask"
+                    else f"阻断 {call.tool}"
+                ),
                 summary=(
                     f"Tool Proxy 未执行 {call.tool}，等待显式批准。"
-                    if action == "ask"
+                    if evaluation_action == "ask"
                     else f"Tool Proxy 未执行 {call.tool}，不存在工具副作用。"
                 ),
                 details={
                     "call_id": call.call_id,
                     "tool": call.tool,
                     "executed": False,
+                    "execution_attempted": False,
+                    "execution_status": "not_executed",
+                    "execution_delegated": False,
+                    "fusion_action": fusion_action,
+                    "approval_status": approval_status,
                     "arguments": decision.normalized_args,
                     "approval_id": approval_id,
                 },
@@ -411,15 +532,34 @@ class ToolProxy:
             task=call.task,
             tool=call.tool,
             args=TransparencyService.redact(decision.normalized_args),
-            decision=action,
-            risk_level=decision.risk_level,
-            reasons=decision.reasons,
+            decision=fusion_action,
+            risk_level=fusion_risk_level,
+            reasons=fusion_reasons,
             source=call.source,
             tainted=call.tainted,
             result_summary=str(TransparencyService.redact(summary)),
             latency_ms=policy_latency_ms,
             ct_trm=TransparencyService.redact(decision.assessment),
             call_id=call.call_id,
+            event_type=audit_event_type,
+            execution_attempted=execution_attempted,
+            execution_status=execution_status,
+            approval_status=approval_status,
+            execution_error=execution_error,
+            result_evidence={
+                "fusion_action": fusion_action,
+                "approval_recheck_action": (
+                    evaluation_action if approval_context else ""
+                ),
+                "approval_status": approval_status,
+                "execution_authorized": execution_authorized,
+                "execution_attempted": execution_attempted,
+                "execution_status": execution_status,
+                "execution_error": execution_error,
+                "execution_delegated": bool(
+                    result.get("execution_delegated")
+                ),
+            },
         )
         self.transparency.emit(
             call.trace_id,
@@ -434,6 +574,11 @@ class ToolProxy:
                 "audit_seq": audit_event["seq"],
                 "prev_hash": audit_event["prev_hash"],
                 "hash": audit_event["hash"],
+                "audit_type": audit_event_type,
+                "fusion_action": fusion_action,
+                "approval_status": approval_status,
+                "execution_attempted": execution_attempted,
+                "execution_status": execution_status,
                 "policy_latency_ms": round(policy_latency_ms, 3),
                 "total_latency_ms": round(total_latency_ms, 3),
             },
@@ -441,9 +586,20 @@ class ToolProxy:
         return {
             "trace_id": call.trace_id,
             "call_id": call.call_id,
-            "action": action,
-            "risk_level": decision.risk_level,
-            "reasons": decision.reasons,
+            "fusion_action": fusion_action,
+            # Backward-compatible alias.  It is always the fused decision and
+            # is never rewritten from an execution result.
+            "action": fusion_action,
+            "approval_status": approval_status,
+            "approval_recheck_action": (
+                evaluation_action if approval_context else ""
+            ),
+            "execution_authorized": execution_authorized,
+            "execution_attempted": execution_attempted,
+            "execution_status": execution_status,
+            "execution_error": execution_error,
+            "risk_level": fusion_risk_level,
+            "reasons": fusion_reasons,
             "result": result,
             "audit": audit_event,
             "latency_ms": round(policy_latency_ms, 3),
@@ -543,21 +699,52 @@ class ToolProxy:
     def resolve_approval(self, approval_id: str, *, approve: bool,
                          actor: str = "user") -> dict:
         persisted = None
+        claim_token: str | None = None
         if self.state_store is not None:
-            persisted = self.state_store.get_approval(approval_id)
-            if persisted is None or persisted["status"] != "pending":
-                with self._approval_lock:
-                    self._pending_approvals.pop(approval_id, None)
-                raise ValueError(
-                    "Approval does not exist, has expired, or was already resolved"
+            claim_token = uuid.uuid4().hex
+            persisted = self.state_store.claim_approval(
+                approval_id,
+                claim_token=claim_token,
+                retention_seconds=self.approval_ttl_seconds,
+            )
+            if persisted is None:
+                current = self.state_store.get_approval(approval_id)
+                if current is None:
+                    raise ValueError(
+                        "Approval does not exist or has expired"
+                    )
+                current_status = str(current.get("status") or "unknown")
+                code = (
+                    "approval_already_resolving"
+                    if current_status == "resolving"
+                    else "approval_already_processed"
                 )
+                raise ApprovalConflictError(code, current_status)
         with self._approval_lock:
             pending = self._pending_approvals.pop(approval_id, None)
+            memory_context = self._pending_approval_contexts.pop(
+                approval_id, {}
+            )
             if pending is None and persisted is not None:
                 pending = self._pending_from_item(persisted)
         if pending is None:
             raise ValueError("审批请求不存在、已处理或服务已重启")
         call, execute = pending
+        initial_fusion_action = str(
+            (persisted or {}).get("fusion_action")
+            or memory_context.get("initial_fusion_action")
+            or "ask"
+        )
+        initial_risk_level = str(
+            (persisted or {}).get("risk_level")
+            or memory_context.get("initial_risk_level")
+            or "medium"
+        )
+        initial_reasons = list(
+            (persisted or {}).get("reasons")
+            or memory_context.get("initial_reasons")
+            or []
+        )
         self.transparency.emit(
             call.trace_id,
             phase="approval_decision",
@@ -577,9 +764,20 @@ class ToolProxy:
             },
         )
         if approve:
-            outcome = self._handle(call, execute=execute)
+            outcome = self._handle(
+                call,
+                execute=execute,
+                approval_context={
+                    "approval_id": approval_id,
+                    "approval_status": "approved",
+                    "initial_fusion_action": initial_fusion_action,
+                    "initial_risk_level": initial_risk_level,
+                    "initial_reasons": initial_reasons,
+                },
+            )
             self._store_resolution(
                 approval_id,
+                claim_token=claim_token,
                 status="approved",
                 outcome=outcome,
             )
@@ -590,14 +788,26 @@ class ToolProxy:
             task=call.task,
             tool=call.tool,
             args=call.args,
-            decision="deny",
-            risk_level="medium",
-            reasons=["user_rejected"],
+            decision=initial_fusion_action,
+            risk_level=initial_risk_level,
+            reasons=initial_reasons,
             source=call.source,
             tainted=call.tainted,
             result_summary="User rejected pending operation",
             latency_ms=0,
             call_id=call.call_id,
+            event_type="approval_resolution",
+            execution_attempted=False,
+            execution_status="not_executed",
+            approval_status="rejected",
+            result_evidence={
+                "fusion_action": initial_fusion_action,
+                "approval_status": "rejected",
+                "execution_authorized": False,
+                "execution_attempted": False,
+                "execution_status": "not_executed",
+                "resolution_reason": "user_rejected",
+            },
         )
         self.transparency.emit(
             call.trace_id,
@@ -612,14 +822,25 @@ class ToolProxy:
                 "audit_seq": audit_event["seq"],
                 "prev_hash": audit_event["prev_hash"],
                 "hash": audit_event["hash"],
+                "audit_type": "approval_resolution",
+                "fusion_action": initial_fusion_action,
+                "approval_status": "rejected",
+                "execution_attempted": False,
+                "execution_status": "not_executed",
             },
         )
         outcome = {
             "trace_id": call.trace_id,
             "call_id": call.call_id,
-            "action": "deny",
-            "risk_level": "medium",
-            "reasons": ["user_rejected"],
+            "fusion_action": initial_fusion_action,
+            "action": initial_fusion_action,
+            "approval_status": "rejected",
+            "execution_authorized": False,
+            "execution_attempted": False,
+            "execution_status": "not_executed",
+            "execution_error": "",
+            "risk_level": initial_risk_level,
+            "reasons": initial_reasons,
             "result": {"approved": False},
             "audit": audit_event,
             "latency_ms": 0,
@@ -629,6 +850,7 @@ class ToolProxy:
         }
         self._store_resolution(
             approval_id,
+            claim_token=claim_token,
             status="rejected",
             outcome=outcome,
         )
@@ -645,6 +867,18 @@ class ToolProxy:
             self._pending_approvals.setdefault(
                 item["approval_id"],
                 self._pending_from_item(item),
+            )
+            self._pending_approval_contexts.setdefault(
+                item["approval_id"],
+                {
+                    "initial_fusion_action": (
+                        item.get("fusion_action") or "ask"
+                    ),
+                    "initial_risk_level": (
+                        item.get("risk_level") or "medium"
+                    ),
+                    "initial_reasons": list(item.get("reasons") or []),
+                },
             )
 
     @staticmethod
@@ -716,6 +950,7 @@ class ToolProxy:
         self,
         approval_id: str,
         *,
+        claim_token: str | None,
         status: str,
         outcome: dict,
     ) -> None:
@@ -724,7 +959,17 @@ class ToolProxy:
         resolution = {
             "trace_id": outcome.get("trace_id"),
             "call_id": outcome.get("call_id"),
+            "fusion_action": outcome.get("fusion_action"),
             "action": outcome.get("action"),
+            "approval_status": outcome.get("approval_status"),
+            "execution_authorized": bool(
+                outcome.get("execution_authorized")
+            ),
+            "execution_attempted": bool(
+                outcome.get("execution_attempted")
+            ),
+            "execution_status": outcome.get("execution_status"),
+            "execution_error": outcome.get("execution_error") or "",
             "risk_level": outcome.get("risk_level"),
             "reasons": outcome.get("reasons") or [],
             "result": outcome.get("result") or {},
@@ -732,12 +977,23 @@ class ToolProxy:
                 outcome.get("execution_delegated")
             ),
         }
-        self.state_store.resolve_approval(
+        if claim_token is None:
+            raise RuntimeError("persisted approval resolution requires a claim")
+        updated = self.state_store.resolve_approval(
             approval_id,
+            claim_token=claim_token,
             status=status,
             resolution=TransparencyService.redact(resolution),
+            fusion_action=str(outcome.get("fusion_action") or ""),
+            risk_level=str(outcome.get("risk_level") or ""),
+            reasons=list(outcome.get("reasons") or []),
             retention_seconds=self.approval_ttl_seconds,
         )
+        if not updated:
+            raise ApprovalConflictError(
+                "approval_resolution_claim_lost",
+                "resolving",
+            )
 
     @staticmethod
     def _policy_evidence_summary(reasons: list[str]) -> str:

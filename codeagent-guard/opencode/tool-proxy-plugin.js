@@ -305,11 +305,14 @@ async function waitForApproval(baseUrl, approvalId, options) {
     );
     if (approval.status === "approved") {
       const resolution = approval.resolution || {};
-      if (resolution.action !== "allow") {
+      const approvalStatus = resolution.approval_status || approval.status;
+      if (approvalStatus !== "approved" || resolution.execution_authorized !== true) {
         const reasons = (resolution.reasons || []).join(", ") || "policy_rejected";
         throw new Error(
           `CodeAgent Guard did not authorize the resumed call: ` +
-            `${resolution.action || "deny"} (${reasons})`,
+            `approval_status=${approvalStatus || "unknown"}, ` +
+            `execution_authorized=${String(resolution.execution_authorized)} ` +
+            `(${reasons})`,
         );
       }
       return resolution;
@@ -378,18 +381,19 @@ export const CodeAgentGuardToolProxy = async (ctx, options = {}) => {
         },
       );
 
-      if (result.action === "ask" && result.approval_id) {
+      const fusionAction = result.fusion_action || result.action;
+      if (fusionAction === "ask" && result.approval_id) {
         await waitForApproval(baseUrl, result.approval_id, options);
         return;
       }
 
-      if (result.action !== "allow") {
+      if (fusionAction !== "allow" || result.execution_authorized !== true) {
         const approval = result.approval_id
           ? ` approval_id=${result.approval_id}`
           : "";
         const reasons = (result.reasons || []).join(", ") || "policy_rejected";
         throw new Error(
-          `CodeAgent Guard blocked ${input.tool}: ${result.action} ` +
+          `CodeAgent Guard blocked ${input.tool}: ${fusionAction || "unknown"} ` +
           `(${reasons}).${approval}`,
         );
       }

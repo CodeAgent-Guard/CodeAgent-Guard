@@ -74,13 +74,29 @@ class RuntimeStateTests(unittest.TestCase):
             pending["approval_id"],
             approve=True,
         )
-        self.assertEqual(outcome["action"], "allow")
+        self.assertEqual(outcome["fusion_action"], "ask")
+        self.assertEqual(outcome["action"], "ask")
+        self.assertEqual(outcome["approval_status"], "approved")
+        self.assertTrue(outcome["execution_authorized"])
+        self.assertFalse(outcome["execution_attempted"])
+        self.assertEqual(outcome["execution_status"], "not_executed")
         self.assertTrue(outcome["execution_delegated"])
         self.assertEqual(executor.calls, 0)
 
         status = restarted.get_approval_status(pending["approval_id"])
         self.assertEqual(status["status"], "approved")
-        self.assertEqual(status["resolution"]["action"], "allow")
+        self.assertEqual(status["resolution"]["fusion_action"], "ask")
+        self.assertEqual(status["resolution"]["action"], "ask")
+        self.assertEqual(
+            status["resolution"]["approval_status"],
+            "approved",
+        )
+        self.assertTrue(status["resolution"]["execution_authorized"])
+        self.assertFalse(status["resolution"]["execution_attempted"])
+        self.assertEqual(
+            status["resolution"]["execution_status"],
+            "not_executed",
+        )
         self.assertTrue(status["resolution"]["execution_delegated"])
 
     def test_rejected_approval_status_is_retained(self) -> None:
@@ -102,7 +118,18 @@ class RuntimeStateTests(unittest.TestCase):
             pending["approval_id"]
         )
         self.assertEqual(status["status"], "rejected")
-        self.assertEqual(status["resolution"]["action"], "deny")
+        self.assertEqual(status["resolution"]["fusion_action"], "ask")
+        self.assertEqual(status["resolution"]["action"], "ask")
+        self.assertEqual(
+            status["resolution"]["approval_status"],
+            "rejected",
+        )
+        self.assertFalse(status["resolution"]["execution_authorized"])
+        self.assertFalse(status["resolution"]["execution_attempted"])
+        self.assertEqual(
+            status["resolution"]["execution_status"],
+            "not_executed",
+        )
         self.assertTrue(AuditStore(self.audit_path).verify()["valid"])
 
     def test_taint_source_survives_policy_restart(self) -> None:
@@ -174,7 +201,16 @@ class RuntimeStateTests(unittest.TestCase):
                 plugin = plugin_path.read_text(encoding="utf-8")
                 self.assertIn("waitForApproval", plugin)
                 self.assertIn("/api/approvals/", plugin)
-                self.assertIn('result.action === "ask"', plugin)
+                self.assertIn(
+                    "const fusionAction = result.fusion_action || result.action",
+                    plugin,
+                )
+                self.assertIn('fusionAction === "ask"', plugin)
+                self.assertIn('approvalStatus !== "approved"', plugin)
+                self.assertIn(
+                    "resolution.execution_authorized !== true",
+                    plugin,
+                )
                 self.assertIn('"chat.message"', plugin)
                 self.assertIn('"tool.execute.after"', plugin)
                 self.assertIn("/api/opencode/tool-result", plugin)

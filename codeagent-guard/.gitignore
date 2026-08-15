@@ -37,7 +37,7 @@ data/server.instance.lock
 data/edge-*/
 data/evaluation/*_result.json
 workspace/
-.demo_fake_home/
+.sandbox_home/
 
 # Logs and temporary files
 tmp/

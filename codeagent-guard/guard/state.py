@@ -72,6 +72,11 @@ class RuntimeStateStore:
                 "resolution_json": "TEXT NOT NULL DEFAULT '{}'",
                 "expires_at": "REAL NOT NULL DEFAULT 0",
                 "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+                "claim_token": "TEXT",
+                "claimed_at": "TEXT",
+                "fusion_action": "TEXT",
+                "risk_level": "TEXT",
+                "reasons": "TEXT NOT NULL DEFAULT '[]'",
             })
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ct_trm_sources (
@@ -126,6 +131,9 @@ class RuntimeStateStore:
         *,
         execute: bool,
         ttl_seconds: int = 900,
+        fusion_action: str = "ask",
+        risk_level: str | None = None,
+        reasons: list[str] | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         expires_at = time.time() + ttl_seconds
@@ -135,9 +143,10 @@ class RuntimeStateStore:
                     approval_id, trace_id, call_id, agent_id, task, tool,
                     args_json, source, tainted, allowed_tools_json, created_at,
                     execute_flag, conversation_id, status, resolved_at,
-                    resolution_json, expires_at, metadata_json
+                    resolution_json, expires_at, metadata_json, claim_token,
+                    claimed_at, fusion_action, risk_level, reasons
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending',
-                          NULL, '{}', ?, ?)
+                          NULL, '{}', ?, ?, NULL, NULL, ?, ?, ?)
                 ON CONFLICT(approval_id) DO UPDATE SET
                     trace_id=excluded.trace_id,
                     call_id=excluded.call_id,
@@ -155,7 +164,12 @@ class RuntimeStateStore:
                     resolved_at=NULL,
                     resolution_json='{}',
                     expires_at=excluded.expires_at,
-                    metadata_json=excluded.metadata_json
+                    metadata_json=excluded.metadata_json,
+                    claim_token=NULL,
+                    claimed_at=NULL,
+                    fusion_action=excluded.fusion_action,
+                    risk_level=excluded.risk_level,
+                    reasons=excluded.reasons
             """, (
                 approval_id,
                 call["trace_id"],
@@ -172,6 +186,9 @@ class RuntimeStateStore:
                 call.get("conversation_id"),
                 expires_at,
                 _json(call.get("metadata", {})),
+                fusion_action,
+                risk_level,
+                _json(reasons or []),
             ))
             conn.commit()
 
@@ -193,32 +210,115 @@ class RuntimeStateStore:
             ).fetchone()
         return self._approval_row(row) if row is not None else None
 
+    def claim_approval(
+        self,
+        approval_id: str,
+        *,
+        claim_token: str,
+        retention_seconds: int = 900,
+    ) -> dict | None:
+        """Atomically claim a pending approval for exactly one resolver.
+
+        SQLite owns the concurrency guarantee so separate store/proxy
+        instances sharing this database cannot both acquire execution rights.
+        """
+        if not claim_token:
+            raise ValueError("claim_token must not be empty")
+        now_epoch = time.time()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        retained_until = now_epoch + retention_seconds
+        with self._lock, closing(self.connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE pending_approvals
+                SET status='expired', resolved_at=?,
+                    resolution_json=?, expires_at=?
+                WHERE approval_id=? AND status='pending'
+                  AND expires_at > 0 AND expires_at < ?
+                """,
+                (
+                    now_iso,
+                    _json({
+                        "fusion_action": "ask",
+                        "action": "ask",
+                        "approval_status": "expired",
+                        "execution_authorized": False,
+                        "execution_attempted": False,
+                        "execution_status": "not_executed",
+                        "reasons": ["approval_expired"],
+                    }),
+                    retained_until,
+                    approval_id,
+                    now_epoch,
+                ),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE pending_approvals
+                SET status='resolving', claim_token=?, claimed_at=?,
+                    expires_at=?
+                WHERE approval_id=? AND status='pending'
+                  AND (expires_at <= 0 OR expires_at >= ?)
+                """,
+                (
+                    claim_token,
+                    now_iso,
+                    retained_until,
+                    approval_id,
+                    now_epoch,
+                ),
+            )
+            row = None
+            if cursor.rowcount == 1:
+                row = conn.execute(
+                    "SELECT * FROM pending_approvals WHERE approval_id=?",
+                    (approval_id,),
+                ).fetchone()
+            conn.commit()
+        return self._approval_row(row) if row is not None else None
+
     def resolve_approval(
         self,
         approval_id: str,
         *,
+        claim_token: str,
         status: str,
         resolution: dict,
+        fusion_action: str | None = None,
+        risk_level: str | None = None,
+        reasons: list[str] | None = None,
         retention_seconds: int = 900,
-    ) -> None:
+    ) -> bool:
         if status not in {"approved", "rejected", "expired"}:
             raise ValueError(f"invalid approval status: {status}")
+        if not claim_token:
+            raise ValueError("claim_token must not be empty")
         with self._lock, closing(self.connect()) as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
-                UPDATE pending_approvals
-                SET status=?, resolved_at=?, resolution_json=?, expires_at=?
-                WHERE approval_id=?
+                UPDATE pending_approvals SET
+                    status=?, resolved_at=?, resolution_json=?, expires_at=?,
+                    fusion_action=COALESCE(?, fusion_action),
+                    risk_level=COALESCE(?, risk_level),
+                    reasons=COALESCE(?, reasons)
+                WHERE approval_id=? AND status='resolving'
+                  AND claim_token=?
                 """,
                 (
                     status,
                     datetime.now(timezone.utc).isoformat(),
                     _json(resolution),
                     time.time() + retention_seconds,
+                    fusion_action,
+                    risk_level,
+                    _json(reasons) if reasons is not None else None,
                     approval_id,
+                    claim_token,
                 ),
             )
             conn.commit()
+        return cursor.rowcount == 1
 
     def save_taint_source(
         self,
@@ -335,19 +435,29 @@ class RuntimeStateStore:
                 UPDATE pending_approvals
                 SET status='expired',
                     resolved_at=?,
-                    resolution_json='{"action":"deny","reasons":["approval_expired"]}',
+                    resolution_json=?,
                     expires_at=?
                 WHERE status='pending' AND expires_at > 0 AND expires_at < ?
                 """,
                 (
                     datetime.now(timezone.utc).isoformat(),
+                    _json({
+                        "fusion_action": "ask",
+                        "action": "ask",
+                        "approval_status": "expired",
+                        "execution_authorized": False,
+                        "execution_attempted": False,
+                        "execution_status": "not_executed",
+                        "reasons": ["approval_expired"],
+                    }),
                     now + 900,
                     now,
                 ),
             )
             conn.execute(
                 "DELETE FROM pending_approvals "
-                "WHERE status!='pending' AND expires_at > 0 AND expires_at < ?",
+                "WHERE status IN ('approved', 'rejected', 'expired') "
+                "AND expires_at > 0 AND expires_at < ?",
                 (now,),
             )
             conn.execute(
@@ -382,8 +492,13 @@ class RuntimeStateStore:
             "execute": bool(row["execute_flag"]),
             "conversation_id": row["conversation_id"],
             "status": row["status"],
+            "claim_token": row["claim_token"],
+            "claimed_at": row["claimed_at"],
             "resolved_at": row["resolved_at"],
             "resolution": json.loads(row["resolution_json"] or "{}"),
+            "fusion_action": row["fusion_action"],
+            "risk_level": row["risk_level"],
+            "reasons": json.loads(row["reasons"] or "[]"),
             "expires_at": float(row["expires_at"] or 0),
             "metadata": json.loads(row["metadata_json"] or "{}"),
         }

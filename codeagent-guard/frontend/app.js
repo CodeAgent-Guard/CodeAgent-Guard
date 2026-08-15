@@ -50,8 +50,9 @@ const decisionClass = value => ["allow", "ask", "deny"].includes(String(value ||
   ? String(value).toLowerCase() : "pending";
 const decisionLabel = value => ({allow: "ALLOW", ask: "ASK", deny: "DENY"}[decisionClass(value)] || "待定");
 const riskLabel = value => ({low: "LOW", medium: "MEDIUM", high: "HIGH", critical: "HIGH"}[String(value || "").toLowerCase()] || "未知风险");
+const executionFailed = value => ["error", "failed", "unknown_side_effects"].includes(String(value || "").toLowerCase());
 const auditEventLabel = event => event?.event_type === "external_execution_result"
-  ? (event.execution_status === "error" ? "执行失败" : "已执行")
+  ? (executionFailed(event.execution_status) ? "执行失败" : "已执行")
   : decisionLabel(event?.decision);
 const maskSensitive = value => String(value ?? "")
   .replace(/sk-[A-Za-z0-9_-]{8,}/g, match => `${match.slice(0, 5)}****${match.slice(-4)}`)
@@ -134,15 +135,24 @@ function pathPresentation(value) {
   const roots = workspaceRoots();
   const resolvedPath = resolvePathSegments(path);
   const resolvedLower = resolvedPath.toLowerCase();
-  const isolatedSensitive = lower.match(/(?:^|\/)(\.demo_fake_home\/\.ssh\/(?:id_rsa|id_ed25519))(?:$|\/)/);
-  if (isolatedSensitive) {
-    const insideWorkspace = roots.some(item => resolvedLower === resolvePathSegments(item).toLowerCase() || resolvedLower.startsWith(`${resolvePathSegments(item).toLowerCase()}/`));
-    const absolute = /^(?:[a-z]:\/|\/)/i.test(path);
-    const outsideWorkspace = relativePathEscapes(path) || (absolute && !insideWorkspace);
-    const evidencePath = /^\.\.\//.test(path) ? path : isolatedSensitive[1];
+  const absolute = /^(?:[a-z]:\/|\/)/i.test(path);
+  const primaryWorkspace = resolvePathSegments(canonicalPath(state.health?.workspace)).toLowerCase();
+  const contextualPath = !absolute && primaryWorkspace
+    ? resolvePathSegments(`${primaryWorkspace}/${path}`)
+    : resolvedPath;
+  const contextualLower = contextualPath.toLowerCase();
+  const insidePrimaryWorkspace = Boolean(primaryWorkspace)
+    && (contextualLower === primaryWorkspace || contextualLower.startsWith(`${primaryWorkspace}/`));
+  const insideTrustedRoot = roots.some(item => {
+    const root = resolvePathSegments(item).toLowerCase();
+    return contextualLower === root || contextualLower.startsWith(`${root}/`);
+  });
+  const isolatedSensitive = lower.match(/(?:^|\/)(\.ssh\/(?:id_rsa|id_ed25519))(?:$|\/)/);
+  if (isolatedSensitive && insideTrustedRoot && !insidePrimaryWorkspace) {
+    const evidencePath = /(?:^|\/)\.\.(?:\/|$)/.test(path) ? path : isolatedSensitive[1];
     return {
-      label: `隔离敏感文件｜${evidencePath}${outsideWorkspace ? "（工作区外）" : ""}`,
-      scope: outsideWorkspace ? "工作区外 · 隔离测试资源" : "隔离测试资源",
+      label: `隔离敏感文件｜${evidencePath}（工作区外）`,
+      scope: "工作区外 · 隔离测试资源",
       relative: evidencePath,
       raw,
     };
@@ -533,9 +543,21 @@ function callGroups(trace) {
     const executionAudits = auditEvents.filter(item => item.details?.audit_type === "external_execution_result");
     const audit = executionAudits.at(-1) || auditEvents.at(-1);
     const approval = lastEvent("approval_decision");
-    const initialDecision = first(initialFusion?.details?.decision, initialFusion?.status, initialPolicy?.details?.decision, initialPolicy?.status, initialAction?.status, "pending");
-    const fusionDecision = first(fusion?.details?.decision, fusion?.status, initialDecision);
-    const displayDecision = decisionClass(initialDecision) === "ask" && approval ? "ask" : fusionDecision;
+    const cancelled = lastEvent("tool_call_cancelled");
+    const cancelledArguments = (() => {
+      const value = first(cancelled?.details?.arguments, cancelled?.details?.raw_arguments, {});
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
+      if (typeof value !== "string") return {};
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch (_error) {
+        return {};
+      }
+    })();
+    const initialDecision = first(initialFusion?.details?.lifecycle_fusion_action, initialFusion?.details?.fusion_action, initialFusion?.details?.decision, initialFusion?.status, initialPolicy?.details?.decision, initialPolicy?.status, initialAction?.status, "pending");
+    const fusionDecision = first(fusion?.details?.lifecycle_fusion_action, fusion?.details?.fusion_action, fusion?.details?.decision, fusion?.status, initialDecision);
+    const displayDecision = cancelled ? "cancelled" : decisionClass(initialDecision) === "ask" && approval ? "ask" : fusionDecision;
     const dlpEvents = events.filter(item => item.phase === "dlp_scan");
     const dlpStage = item => String(first(item.details?.scan_stage, item.details?.direction, item.details?.target, "")).toLowerCase();
     const inputDlp = dlpEvents.find(item => /input|argument|request/.test(dlpStage(item))) || dlpEvents[0];
@@ -553,20 +575,24 @@ function callGroups(trace) {
       result,
       audit,
       approval,
+      cancelled,
       dlp: inputDlp,
       outputDlp,
       ct: lastEvent("ct_trm_assessment"),
-      tool: first(plan?.details?.tool, policy?.details?.tool, action?.details?.tool, result?.details?.tool, "tool"),
-      args: first(plan?.details?.arguments, policy?.details?.normalized_arguments, action?.details?.arguments, {}),
+      tool: first(plan?.details?.tool, policy?.details?.tool, action?.details?.tool, result?.details?.tool, cancelled?.details?.tool, "tool"),
+      args: first(plan?.details?.arguments, policy?.details?.normalized_arguments, action?.details?.arguments, cancelledArguments, {}),
       initialDecision,
       fusionDecision,
       decision: displayDecision,
-      risk: first(fusion?.details?.risk_level, policy?.details?.risk_level, "low"),
+      risk: cancelled ? "not_evaluated" : first(fusion?.details?.risk_level, policy?.details?.risk_level, "low"),
     };
   });
 }
 
 function callDecisionPresentation(group) {
+  if (group?.cancelled) {
+    return {decision: "pending", label: "未进入", status: "CANCELLED", source: "Decision Fusion｜无裁决", approval: "不适用"};
+  }
   const initial = decisionClass(first(group?.initialDecision, group?.decision));
   const fusion = decisionClass(first(group?.fusionDecision, group?.decision));
   const approved = group?.approval?.details?.approved;
@@ -580,6 +606,7 @@ function callDecisionPresentation(group) {
 }
 
 function fusionDecisionReason(group) {
+  if (group?.cancelled) return "该 ToolCall 已由 Agent Controller 取消，未提交 Tool Proxy，因此没有进入 Decision Fusion。";
   const fusion = group?.initialFusion?.details || group?.fusion?.details || {};
   const decision = decisionClass(first(group?.initialDecision, group?.fusionDecision, group?.decision));
   const reason = first(fusion.reason, fusion.explanation, (fusion.reasons || []).map(reasonText).join("；"));
@@ -723,9 +750,14 @@ function executionSuccessSummary(tool) {
 
 function executionState(group, auditEvent = null) {
   if (!group) return {key: "unknown", title: "状态未知", detail: "没有可关联的执行事件。"};
+  if (group.cancelled) {
+    return {key: "cancelled", title: "控制器已取消 · 工具未执行", detail: "该调用未提交 Tool Proxy，没有产生工具副作用。"};
+  }
   const action = group.action?.details || {};
   const result = group.result?.details || {};
   const payload = result.result || {};
+  const executionStatus = String(first(result.execution_status, action.execution_status, auditEvent?.execution_status, "")).toLowerCase();
+  const executionError = first(result.execution_error, action.execution_error, auditEvent?.execution_error, payload.error, group.result?.summary, auditEvent?.result_summary, "执行器返回错误");
   if (group.approval?.details?.approved === false) {
     return {key: "rejected", title: "工具未执行 · 用户已拒绝", detail: "审批结论已写入 Trace 与 Audit Hash Chain，没有产生工具副作用。"};
   }
@@ -733,8 +765,12 @@ function executionState(group, auditEvent = null) {
     if (!group.result || group.result?.status === "unavailable" || result.result_unavailable) {
       return {key: "delegated", title: "已授权，外部执行结果未回报", detail: "Guard 只完成执行前授权，不能据此声称工具已执行。"};
     }
-    if (payload.error || group.result?.status === "error") {
-      return {key: "error", title: "OpenCode 已执行 · 执行失败", detail: maskSensitive(payload.error || group.result?.summary || "外部工具返回错误")};
+    if (executionFailed(executionStatus) || payload.error || group.result?.status === "error") {
+      return {
+        key: "error",
+        title: executionStatus === "unknown_side_effects" ? "OpenCode 执行失败 · 副作用状态未知" : "OpenCode 已执行 · 执行失败",
+        detail: maskSensitive(executionError),
+      };
     }
     if (payload.exit_code !== undefined) {
       const exitCode = Number(payload.exit_code);
@@ -746,7 +782,12 @@ function executionState(group, auditEvent = null) {
     }
     return {key: "executed", title: "OpenCode 已执行", detail: "外部工具结果已回报 Guard 并写入审计链。"};
   }
-  if (action.executed === false) {
+  if (
+    action.executed === false
+    && action.execution_attempted !== true
+    && result.execution_attempted !== true
+    && auditEvent?.execution_attempted !== true
+  ) {
     if (decisionClass(group.decision) === "ask") {
       const approvalPending = !state.resourceErrors.approvals && state.approvals.some(item => item.approval_id === action.approval_id);
       if (action.approval_id && !state.resourceErrors.approvals && !approvalPending) {
@@ -756,9 +797,13 @@ function executionState(group, auditEvent = null) {
     }
     return {key: "blocked", title: "工具未执行", detail: "Tool Proxy 在产生副作用前阻断了调用。"};
   }
-  if (action.executed === true) {
-    if (payload.error || group.result?.status === "error" || (auditEvent?.reasons || []).includes("tool_execution_failed")) {
-      return {key: "error", title: "已尝试执行 · 执行失败", detail: maskSensitive(payload.error || group.result?.summary || auditEvent?.result_summary || "执行器返回错误")};
+  if (action.executed === true || action.execution_attempted === true || result.execution_attempted === true || auditEvent?.execution_attempted === true) {
+    if (executionFailed(executionStatus) || payload.error || group.result?.status === "error" || (auditEvent?.reasons || []).includes("tool_execution_failed")) {
+      return {
+        key: "error",
+        title: executionStatus === "unknown_side_effects" ? "执行失败 · 副作用状态未知" : "已尝试执行 · 执行失败",
+        detail: maskSensitive(executionError),
+      };
     }
     if (payload.exit_code !== undefined) {
       const exitCode = Number(payload.exit_code);
@@ -1306,7 +1351,7 @@ function renderWorkbench() {
   $("#task-summary").innerHTML = `<small>${esc(runtimeIdentityLabel(trace.agent_id, {metadata: trace.metadata}))}</small><b>${esc(selectedTaskSummary)}</b>${identifierRef("Trace", trace.trace_id)}${rawDetails("查看完整任务", {task: trace.task, agent_id: trace.agent_id})}`;
   $("#call-timeline").innerHTML = groups.map((item, index) => {
     const summary = argumentSummary(item.tool, item.policy?.details?.normalized_arguments || item.args || {});
-    return `<button type="button" class="call-item ${decisionClass(item.decision)} ${item.callId === group.callId ? "active" : ""}" data-call-id="${esc(item.callId)}"><i>ToolCall #${index + 1}</i><div><b>${esc(item.tool)}</b><small>${esc(truncate(summary.oneLine, 48))}</small></div><em>${esc(decisionLabel(item.decision))}</em></button>`;
+    return `<button type="button" class="call-item ${decisionClass(item.decision)} ${item.callId === group.callId ? "active" : ""}" data-call-id="${esc(item.callId)}"><i>ToolCall #${index + 1}</i><div><b>${esc(item.tool)}</b><small>${esc(truncate(summary.oneLine, 48))}</small></div><em>${esc(item.cancelled ? "CANCELLED" : decisionLabel(item.decision))}</em></button>`;
   }).join("");
   requestAnimationFrame(() => {
     const timeline = $("#call-timeline");
@@ -1342,6 +1387,9 @@ function renderWorkbench() {
     const target = first(matches[0]?.argument, Object.keys(normalizedArgs)[0], "tool arguments");
     provenanceNode.className = "provenance-panel";
     provenanceNode.innerHTML = `<small>来源与污染路径</small><b>${esc(sourcePresentation(source))}</b><code>${esc(sourcePresentation(source))} → 参数 ${esc(target)} → ${esc(group.tool)}</code>${rawDetails("查看完整污染证据", {source, taint_matches: matches, provenance_edges: edges})}`;
+  } else if (group.cancelled) {
+    provenanceNode.className = "provenance-panel empty-state";
+    provenanceNode.innerHTML = `<small>来源与污染路径</small><b>未进入风险分析</b><code>调用在 Agent Controller 层取消，未提交 Tool Proxy</code>`;
   } else {
     provenanceNode.className = "provenance-panel empty-state";
     provenanceNode.innerHTML = `<small>来源与污染路径</small><b>${esc(sourcePresentation(sourceFrom(group, trace)))}</b><code>未检测到参数污染传播</code>`;
@@ -1434,6 +1482,9 @@ function renderDecision(group) {
       : linkedAudit ? "Trace 与审计库已关联" : "Trace 内嵌记录";
     recordNode.className = "record-panel";
     recordNode.innerHTML = `<small>审计已写入 · ${esc(auditSource)}</small><div class="record-facts"><div><i>Trace</i>${identifierRef("Trace", state.selectedTrace?.trace_id)}</div><div><i>事件</i><b>#${esc(audit.audit_seq)}</b></div><div><i>Hash</i>${identifierRef("Hash", audit.hash)}</div><div><i>完整性</i><b>${verified ? "校验通过" : broken ? "校验失败" : "已写入"}</b></div></div>${rawDetails("查看完整审计标识", {trace_id: state.selectedTrace?.trace_id, trace_audit_record: group.audit || null, linked_audit_record: linkedAudit || null})}`;
+  } else if (group.cancelled) {
+    recordNode.className = "record-panel empty-state";
+    recordNode.textContent = "取消事件已写入 Transparency Trace；该调用未提交 Tool Proxy，因此没有调用审计记录。";
   } else {
     recordNode.className = "record-panel empty-state";
     recordNode.textContent = "当前 ToolCall 未找到 audit_record";
@@ -1453,6 +1504,7 @@ function traceEventPresentation(event, trace, group) {
   if (phaseName === "agent_pause") return {actor: "审批", title: "调用暂停等待审批", summary: "工具尚未执行，参数保持冻结。"};
   if (phaseName === "agent_resume") return {actor: "审批", title: "审批流程已结束", summary: truncate(humanizeMachineText(event.summary || "Agent 根据审批结论继续", trace?.trace_id), 110)};
   if (phaseName === "agent_plan") return {actor: runtimeIdentity(trace?.agent_id, trace?.metadata).entry, title: "捕获并标准化工具调用", summary: `${group?.tool || "工具"} · ${summary.oneLine}`};
+  if (phaseName === "tool_call_cancelled") return {actor: "Agent Controller", title: "取消未提交的 ToolCall", summary: `${details.tool || group?.tool || "工具"} · 未提交 Tool Proxy · 工具未执行`};
   if (phaseName === "dlp_scan") {
     const stage = String(first(details.scan_stage, details.direction, details.target, "input")).toLowerCase();
     const direction = /output|result|response/.test(stage) ? "output" : "input";
@@ -1479,12 +1531,17 @@ function traceEventPresentation(event, trace, group) {
   if (phaseName === "tool_action") {
     const executed = details.executed;
     const delegated = details.execution_delegated;
-    return {actor: "Tool Proxy", title: executed ? "受控工具已执行" : delegated ? "已授权外部工具执行" : "工具在执行前被阻断", summary: executed ? "执行动作已记录" : delegated ? "等待 OpenCode 回报真实执行结果" : "未产生工具副作用"};
+    const failed = executionFailed(details.execution_status);
+    return {
+      actor: "Tool Proxy",
+      title: failed ? "工具执行发生异常" : executed ? "受控工具已执行" : delegated ? "已授权外部工具执行" : "工具在执行前被阻断",
+      summary: failed ? (details.execution_status === "unknown_side_effects" ? "执行失败，副作用状态未知" : "执行失败") : executed ? "执行动作已记录" : delegated ? "等待 OpenCode 回报真实执行结果" : "未产生工具副作用",
+    };
   }
   if (phaseName === "tool_result") {
     const result = details.result || {};
     const exitCode = first(result.exit_code, details.exit_code);
-    const failed = event.status === "error" || result.error;
+    const failed = executionFailed(first(details.execution_status, event.status)) || result.error;
     const readOnly = group?.tool === "read_file" || (group?.tool === "run_command" && /^\s*(?:pwd|cat|head|tail|wc|stat|ls)\b/i.test(String(presentationArgs.cmd || presentationArgs.command || "")));
     const modification = first(result.files_modified, result.modified_files, details.files_modified, details.modified_files);
     const modifiedText = Array.isArray(modification) ? `修改 ${modification.length} 个文件` : modification === false || readOnly ? "未修改文件" : "未记录文件变更结论";
@@ -1504,7 +1561,7 @@ function traceEventPresentation(event, trace, group) {
 
 const TRACE_STAGE_DEFINITIONS = [
   {key: "request", title: "请求进入", phases: ["user_task", "task_authorization"]},
-  {key: "toolcall", title: "ToolCall 标准化与语义解析", phases: ["agent_plan"]},
+  {key: "toolcall", title: "ToolCall 标准化与语义解析", phases: ["agent_plan", "tool_call_cancelled"]},
   {key: "policy", title: "Policy Engine", phases: ["policy_decision"]},
   {key: "ct", title: "CT-TRM", phases: ["ct_trm_assessment"]},
   {key: "dlp", title: "DLP", phases: ["dlp_scan"]},
@@ -1518,7 +1575,7 @@ const TRACE_STAGE_DEFINITIONS = [
 function traceStageBusinessStatus(stage, event, readable) {
   const details = event?.details || {};
   if (stage.key === "request") return "已接收";
-  if (stage.key === "toolcall") return "已标准化";
+  if (stage.key === "toolcall") return event?.phase === "tool_call_cancelled" ? "CANCELLED" : "已标准化";
   if (stage.key === "policy") return (details.matched_rules || []).length ? "已命中" : "已检查";
   if (stage.key === "ct") return readable.status || riskLabel(details.risk_level || event?.status);
   if (stage.key === "dlp") return readable.status || dlpScanPresentation(details, "input").status;
@@ -1618,7 +1675,7 @@ function renderTraceEvents(trace, callId) {
     const readable = traceEventPresentation(lastEvent, trace, group);
     let summary = readable.summary;
     let status = traceStageBusinessStatus(stage, lastEvent, readable);
-    if (stage.key === "toolcall") summary = `${group?.tool || "工具"} · ${semantics.object} · ${semantics.action}`;
+    if (stage.key === "toolcall" && lastEvent?.phase !== "tool_call_cancelled") summary = `${group?.tool || "工具"} · ${semantics.object} · ${semantics.action}`;
     if (stage.key === "fusion") status = decisionLabel(first(lastEvent.details?.decision, lastEvent.status));
     if (stage.key === "proxy") {
       const stageAction = stage.events.filter(event => event.phase === "tool_action").at(-1);
@@ -1685,13 +1742,17 @@ function auditGroupLifecycle(group) {
   const initial = decisionClass(group?.initialDecisionEvent?.decision);
   const final = decisionClass(group?.decisionEvent?.decision);
   const reasons = reasonCodes(group?.decisionEvent?.reasons);
-  if (initial === "ask" && final === "deny" && reasons.includes("user_rejected")) {
+  const approvalStatus = String(first(group?.decisionEvent?.approval_status, group?.resultEvent?.approval_status, "")).toLowerCase();
+  if (initial === "ask" && (approvalStatus === "rejected" || reasons.includes("user_rejected"))) {
     return {decision: "ask", label: "ASK → 用户拒绝", execution: "未执行"};
   }
-  if (initial === "ask" && (final === "allow" || group?.resultEvent)) {
+  if (initial === "ask" && (approvalStatus === "approved" || final === "allow" || group?.resultEvent)) {
     const delegated = /delegated|等待外部|外部执行结果未回报/i.test(String(group?.decisionEvent?.result_summary || ""));
-    const execution = group?.resultEvent
-      ? (group.resultEvent.execution_status === "error" ? "执行失败" : "已执行")
+    const executionStatus = first(group?.resultEvent?.execution_status, group?.decisionEvent?.execution_status);
+    const execution = executionFailed(executionStatus)
+      ? "执行失败"
+      : executionStatus === "not_executed" ? "未执行"
+      : group?.resultEvent ? "已执行"
       : delegated ? "已批准，等待外部结果" : "已执行";
     return {decision: "ask", label: "ASK → 用户批准", execution};
   }
@@ -1710,7 +1771,10 @@ function auditGroupExecutionLabel(group) {
   const lifecycle = auditGroupLifecycle(group);
   if (lifecycle.execution) return lifecycle.execution;
   const event = group.decisionEvent || group.representative;
-  if (group.resultEvent) return group.resultEvent.execution_status === "error" ? "执行失败" : "已执行";
+  if (group.resultEvent) return executionFailed(group.resultEvent.execution_status) ? "执行失败" : "已执行";
+  if (executionFailed(event?.execution_status)) return "执行失败";
+  if (event?.execution_status === "not_executed") return "未执行";
+  if (event?.execution_status === "success") return "已执行";
   const decision = decisionClass(event?.decision);
   if (decision === "deny") return "未执行";
   if (decision === "ask") return "等待审批";

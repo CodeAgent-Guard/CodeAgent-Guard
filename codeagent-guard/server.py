@@ -34,7 +34,7 @@ from guard.executors import ToolExecutorRegistry
 from guard.policy import PolicyEngine
 from guard.providers import LLMProvider
 from guard.state import RuntimeStateStore
-from guard.tools import ToolProxy
+from guard.tools import ApprovalConflictError, ToolProxy
 from guard.transparency import TransparencyService
 from guard.trusted_workspaces import TrustedWorkspaceStore
 
@@ -673,6 +673,11 @@ class Handler(BaseHTTPRequestHandler):
                     and not isinstance(body.get("allowed_tools"), list)
                 ):
                     raise ValueError("allowed_tools 必须是数组或 null")
+                if (
+                    body.get("task_scope") is not None
+                    and not isinstance(body.get("task_scope"), dict)
+                ):
+                    raise ValueError("task_scope 必须是对象或 null")
                 self._json(agent.run(
                     str(body.get("prompt", "")),
                     int(body.get("max_steps", 8)),
@@ -680,11 +685,14 @@ class Handler(BaseHTTPRequestHandler):
                     conversation_id=body.get("conversation_id"),
                     context_max_chars=int(body.get("context_max_chars", 20000)),
                     new_context=bool(body.get("new_context", False)),
+                    task_scope=body.get("task_scope"),
                 ))
             elif parsed.path == "/api/approvals/resolve":
+                if not isinstance(body.get("approve"), bool):
+                    raise ValueError("approve 必须是 JSON boolean")
                 self._json(agent.resolve_approval(
                     str(body.get("approval_id", "")),
-                    approve=bool(body.get("approve", False)),
+                    approve=body["approve"],
                     actor=str(body.get("actor", "user")),
                 ))
             elif parsed.path == "/api/llm/config":
@@ -759,6 +767,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "API endpoint not found"}, 404)
         except _CLIENT_DISCONNECT_ERRORS:
             self.close_connection = True
+        except ApprovalConflictError as exc:
+            self._json({
+                "error": str(exc),
+                "code": exc.code,
+                "approval_status": exc.status,
+            }, HTTPStatus.CONFLICT)
         except ValueError as exc:
             self._json({"error": str(exc)}, 400)
         except Exception as exc:

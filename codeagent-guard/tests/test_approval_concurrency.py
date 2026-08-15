@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -11,16 +12,18 @@ from guard.audit import AuditStore
 from guard.contracts import ToolCall
 from guard.policy import PolicyEngine
 from guard.state import RuntimeStateStore
-from guard.tools import ToolProxy
+from guard.tools import ApprovalConflictError, ToolProxy
 from guard.transparency import TransparencyService
 
 
 class RecordingExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self._lock = threading.Lock()
 
     def execute(self, tool: str, args: dict) -> dict:
-        self.calls.append((tool, dict(args)))
+        with self._lock:
+            self.calls.append((tool, dict(args)))
         return {"ok": True}
 
 
@@ -96,11 +99,112 @@ class ApprovalConcurrencyTests(unittest.TestCase):
             outcome["approval_id"],
             approve=True,
         )
-        self.assertEqual(resolved["action"], "allow")
+        self.assertEqual(resolved["fusion_action"], "ask")
+        self.assertEqual(resolved["action"], "ask")
+        self.assertEqual(resolved["approval_status"], "approved")
+        self.assertTrue(resolved["execution_authorized"])
+        self.assertTrue(resolved["execution_attempted"])
+        self.assertEqual(resolved["execution_status"], "success")
         self.assertEqual(
             self.executor.calls[0][1]["cmd"],
             "printf BENCHMARK_MARKER | grep BENCHMARK",
         )
+
+    def test_two_proxy_instances_claim_one_approval_exactly_once(self) -> None:
+        executor = RecordingExecutor()
+        state_path = self.root / "shared-state.db"
+        audit_path = self.root / "shared-audit.db"
+
+        def make_proxy() -> ToolProxy:
+            state = RuntimeStateStore(state_path)
+            return ToolProxy(
+                self.workspace,
+                AuditStore(audit_path),
+                PolicyEngine(self.workspace, state_store=state),
+                self.root / "shared-outbox",
+                executor=executor,
+                transparency=TransparencyService(),
+                state_store=state,
+                approval_ttl_seconds=60,
+            )
+
+        first = make_proxy()
+        second = make_proxy()
+        pending = first.invoke(ToolCall(
+            tool="send_email",
+            args={
+                "to": "review@example.test",
+                "subject": "Exactly once review",
+                "body": "BENCHMARK_MARKER",
+            },
+            trace_id="trace-approval-cas",
+            task="Send one external benchmark review",
+            agent_id="self-agent",
+            allowed_tools=("send_email",),
+        ))
+        self.assertEqual(pending["fusion_action"], "ask")
+        self.assertEqual(pending["approval_status"], "pending")
+        self.assertFalse(pending["execution_attempted"])
+
+        barrier = threading.Barrier(2)
+
+        def resolve(proxy: ToolProxy) -> tuple[str, object]:
+            barrier.wait(timeout=5)
+            try:
+                return (
+                    "resolved",
+                    proxy.resolve_approval(
+                        pending["approval_id"],
+                        approve=True,
+                    ),
+                )
+            except ApprovalConflictError as error:
+                return ("conflict", error)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(resolve, (first, second)))
+
+        resolved = [value for kind, value in results if kind == "resolved"]
+        conflicts = [value for kind, value in results if kind == "conflict"]
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(len(conflicts), 1)
+        self.assertIn(
+            conflicts[0].code,
+            {"approval_already_resolving", "approval_already_processed"},
+        )
+
+        winner = resolved[0]
+        self.assertEqual(winner["fusion_action"], "ask")
+        self.assertEqual(winner["action"], "ask")
+        self.assertEqual(winner["approval_status"], "approved")
+        self.assertTrue(winner["execution_authorized"])
+        self.assertTrue(winner["execution_attempted"])
+        self.assertEqual(winner["execution_status"], "success")
+        self.assertEqual(len(executor.calls), 1)
+
+        status = RuntimeStateStore(state_path).get_approval(
+            pending["approval_id"]
+        )
+        self.assertIsNotNone(status)
+        self.assertEqual(status["status"], "approved")
+        self.assertEqual(status["resolution"]["fusion_action"], "ask")
+        self.assertEqual(status["resolution"]["action"], "ask")
+        self.assertEqual(status["resolution"]["approval_status"], "approved")
+
+        approval_events = [
+            event
+            for event in AuditStore(audit_path).list_events(
+                limit=20,
+                trace_id="trace-approval-cas",
+            )
+            if event["event_type"] == "approval_resolution"
+        ]
+        self.assertEqual(len(approval_events), 1)
+        self.assertEqual(approval_events[0]["decision"], "ask")
+        self.assertEqual(approval_events[0]["approval_status"], "approved")
+        self.assertTrue(approval_events[0]["execution_attempted"])
+        self.assertEqual(approval_events[0]["execution_status"], "success")
+        self.assertTrue(AuditStore(audit_path).verify()["valid"])
 
     def test_deny_never_enters_approval_queue(self) -> None:
         outcome = self.proxy.authorize(ToolCall(
@@ -137,7 +241,18 @@ class ApprovalConcurrencyTests(unittest.TestCase):
         self.proxy.resolve_approval(outcome["approval_id"], approve=False)
         status = self.proxy.get_approval_status(outcome["approval_id"])
         self.assertEqual(status["status"], "rejected")
-        self.assertEqual(status["resolution"]["action"], "deny")
+        self.assertEqual(status["resolution"]["fusion_action"], "ask")
+        self.assertEqual(status["resolution"]["action"], "ask")
+        self.assertEqual(
+            status["resolution"]["approval_status"],
+            "rejected",
+        )
+        self.assertFalse(status["resolution"]["execution_authorized"])
+        self.assertFalse(status["resolution"]["execution_attempted"])
+        self.assertEqual(
+            status["resolution"]["execution_status"],
+            "not_executed",
+        )
 
 
 class AuditConcurrencyTests(unittest.TestCase):

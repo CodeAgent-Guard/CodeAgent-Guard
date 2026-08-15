@@ -50,6 +50,9 @@ class AuditStore:
                     event_type TEXT NOT NULL DEFAULT 'decision',
                     call_id TEXT NOT NULL DEFAULT '',
                     execution_status TEXT NOT NULL DEFAULT '',
+                    execution_attempted INTEGER,
+                    approval_status TEXT NOT NULL DEFAULT '',
+                    execution_error TEXT NOT NULL DEFAULT '',
                     result_fingerprint TEXT NOT NULL DEFAULT '',
                     result_evidence_json TEXT NOT NULL DEFAULT '{}'
                 )
@@ -78,6 +81,21 @@ class AuditStore:
                     "ALTER TABLE audit_events "
                     "ADD COLUMN execution_status TEXT NOT NULL DEFAULT ''"
                 )
+            if "execution_attempted" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN execution_attempted INTEGER"
+                )
+            if "approval_status" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN approval_status TEXT NOT NULL DEFAULT ''"
+                )
+            if "execution_error" not in columns:
+                conn.execute(
+                    "ALTER TABLE audit_events "
+                    "ADD COLUMN execution_error TEXT NOT NULL DEFAULT ''"
+                )
             if "result_fingerprint" not in columns:
                 conn.execute(
                     "ALTER TABLE audit_events "
@@ -100,6 +118,9 @@ class AuditStore:
                event_type: str = "decision",
                call_id: str | None = None,
                execution_status: str | None = None,
+               execution_attempted: bool | None = None,
+               approval_status: str | None = None,
+               execution_error: str | None = None,
                result_fingerprint: str | None = None,
                result_evidence: dict | None = None) -> dict:
         with self.lock, closing(self.connect()) as conn:
@@ -107,6 +128,13 @@ class AuditStore:
             normalized_event_type = str(event_type or "decision")
             normalized_call_id = str(call_id or "")
             normalized_execution_status = str(execution_status or "")
+            normalized_execution_attempted = (
+                None
+                if execution_attempted is None
+                else bool(execution_attempted)
+            )
+            normalized_approval_status = str(approval_status or "")
+            normalized_execution_error = str(execution_error or "")[:2000]
             normalized_result_fingerprint = str(result_fingerprint or "")
             normalized_result_evidence = result_evidence or {}
             if (
@@ -161,6 +189,12 @@ class AuditStore:
                 payload["call_id"] = normalized_call_id
             if normalized_execution_status:
                 payload["execution_status"] = normalized_execution_status
+            if normalized_execution_attempted is not None:
+                payload["execution_attempted"] = normalized_execution_attempted
+            if normalized_approval_status:
+                payload["approval_status"] = normalized_approval_status
+            if normalized_execution_error:
+                payload["execution_error"] = normalized_execution_error
             if normalized_result_fingerprint:
                 payload["result_fingerprint"] = normalized_result_fingerprint
             if normalized_result_evidence:
@@ -171,8 +205,9 @@ class AuditStore:
                     timestamp, trace_id, task, tool, args_json, decision, risk_level,
                     reasons_json, source, tainted, result_summary, latency_ms,
                     prev_hash, hash, ct_trm_json, event_type, call_id,
-                    execution_status, result_fingerprint, result_evidence_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    execution_status, execution_attempted, approval_status,
+                    execution_error, result_fingerprint, result_evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 timestamp, trace_id, task, tool, canonical_json(args), decision, risk_level,
                 canonical_json(reasons), source, int(tainted),
@@ -180,6 +215,12 @@ class AuditStore:
                 canonical_json(ct_trm or {}),
                 normalized_event_type, normalized_call_id,
                 normalized_execution_status,
+                (
+                    None
+                    if normalized_execution_attempted is None
+                    else int(normalized_execution_attempted)
+                ),
+                normalized_approval_status, normalized_execution_error,
                 normalized_result_fingerprint,
                 canonical_json(normalized_result_evidence),
             ))
@@ -228,6 +269,13 @@ class AuditStore:
         value.setdefault("event_type", "decision")
         value.setdefault("call_id", "")
         value.setdefault("execution_status", "")
+        value["execution_attempted"] = (
+            None
+            if value.get("execution_attempted") is None
+            else bool(value["execution_attempted"])
+        )
+        value.setdefault("approval_status", "")
+        value.setdefault("execution_error", "")
         value.setdefault("result_fingerprint", "")
         value["tainted"] = bool(value["tainted"])
         return value
@@ -313,6 +361,12 @@ class AuditStore:
                 payload["call_id"] = event["call_id"]
             if event.get("execution_status"):
                 payload["execution_status"] = event["execution_status"]
+            if event.get("execution_attempted") is not None:
+                payload["execution_attempted"] = event["execution_attempted"]
+            if event.get("approval_status"):
+                payload["approval_status"] = event["approval_status"]
+            if event.get("execution_error"):
+                payload["execution_error"] = event["execution_error"]
             if event.get("result_fingerprint"):
                 payload["result_fingerprint"] = event["result_fingerprint"]
             if event.get("result_evidence"):
